@@ -1,0 +1,96 @@
+[project]
+title           = "demo"
+bpm             = 120
+time_signature  = "4/4"
+
+[[samples]]
+id   = "k"
+path = "samples/kick.wav"
+
+[[samples]]
+id   = "s"
+path = "samples/snare.wav"
+
+[[samples]]
+id   = "h"
+path = "samples/hat.wav"
+
+[[instruments]]
+id      = "bass"
+kind    = "midi"
+port    = "fluidsynth:0"
+channel = 1
+program = 33    # GM electric bass (finger)
+
+[[instruments]]
+id      = "lead"
+kind    = "midi"
+port    = "fluidsynth:0"
+channel = 2
+program = 81    # GM square lead
+
+# Track bindings: map each pattern track ID to an instrument (pitched MIDI)
+# or a sample + MIDI note (drum). Channel 10 is the GM drum channel.
+[[tracks]]
+id      = "k"
+name    = "Kick"
+sample  = "k"
+channel = 10
+note    = 36   # GM acoustic bass drum
+
+[[tracks]]
+id      = "s"
+name    = "Snare"
+sample  = "s"
+channel = 10
+note    = 38   # GM acoustic snare
+
+[[tracks]]
+id      = "h"
+name    = "Hat"
+sample  = "h"
+channel = 10
+note    = 42   # GM closed hi-hat
+
+[[tracks]]
+id         = "bass"
+name       = "Bass"
+instrument = "bass"
+channel    = 1
+
+[[tracks]]
+id         = "lead"
+name       = "Lead"
+instrument = "lead"
+channel    = 2
+
+# Sections bundle per-track patterns into named arrangement units. Tracks
+# omitted from `parts` are silent for that section. Every pattern a
+# section references must have matching bars/beats_per_bar/resolution.
+[[sections]]
+name = "intro"
+bars = 2
+parts = { h = "intro-h" }
+
+[[sections]]
+name = "verse"
+bars = 4
+parts = { k = "verse-k", s = "verse-s", h = "verse-h", bass = "verse-bass" }
+
+[[sections]]
+name = "chorus"
+bars = 4
+parts = { k = "chorus-k", s = "chorus-s", h = "chorus-h", bass = "chorus-bass", lead = "chorus-lead" }
+
+[[sections]]
+name = "bridge"
+bars = 4
+parts = { k = "bridge-k", s = "bridge-s", h = "bridge-h", bass = "bridge-bass", lead = "bridge-lead" }
+
+[[sections]]
+name = "outro"
+bars = 2
+parts = { k = "outro-k", h = "outro-h", bass = "outro-bass", lead = "outro-lead" }
+
+[song]
+arrangement = ["intro", "verse", "chorus", "verse", "chorus", "bridge", "verse", "chorus", "outro"]
