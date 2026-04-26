@@ -31,11 +31,12 @@ func SetTrackGain(path, trackID string, gain float32) error {
 
 // SetTrackEQ rewrites or inserts the `eq = { ... }` inline-table line
 // inside the named track's [[tracks]] block, expressing the full
-// 3-band config in a stable order.
+// 3-band config in a stable order. The leading `enabled` flag is the
+// bypass toggle — written explicitly so a flipped flag round-trips.
 func SetTrackEQ(path, trackID string, e EQConfig) error {
 	body := fmt.Sprintf(
-		"low_freq = %g, low_gain = %g, mid_freq = %g, mid_q = %g, mid_gain = %g, high_freq = %g, high_gain = %g",
-		e.LowFreq, e.LowGain, e.MidFreq, e.MidQ, e.MidGain, e.HighFreq, e.HighGain,
+		"enabled = %t, low_freq = %g, low_gain = %g, mid_freq = %g, mid_q = %g, mid_gain = %g, high_freq = %g, high_gain = %g",
+		e.Enabled, e.LowFreq, e.LowGain, e.MidFreq, e.MidQ, e.MidGain, e.HighFreq, e.HighGain,
 	)
 	return setTrackInlineTable(path, trackID, "eq", body)
 }
@@ -44,10 +45,54 @@ func SetTrackEQ(path, trackID string, e EQConfig) error {
 // line inside the named track's [[tracks]] block.
 func SetTrackComp(path, trackID string, c CompConfig) error {
 	body := fmt.Sprintf(
-		"threshold_db = %g, ratio = %g, attack_ms = %g, release_ms = %g, makeup_db = %g",
-		c.ThresholdDB, c.Ratio, c.AttackMs, c.ReleaseMs, c.MakeupDB,
+		"enabled = %t, threshold_db = %g, ratio = %g, attack_ms = %g, release_ms = %g, makeup_db = %g",
+		c.Enabled, c.ThresholdDB, c.Ratio, c.AttackMs, c.ReleaseMs, c.MakeupDB,
 	)
 	return setTrackInlineTable(path, trackID, "comp", body)
+}
+
+// SetTrackFilter rewrites or inserts the `filter = { ... }` inline-table.
+// Type defaults to lowpass when the caller hands a zero-value config.
+func SetTrackFilter(path, trackID string, f FilterConfig) error {
+	if f.Type == "" {
+		f.Type = FilterLowpass
+	}
+	body := fmt.Sprintf(
+		"enabled = %t, type = %q, cutoff = %g, resonance = %g",
+		f.Enabled, string(f.Type), f.Cutoff, f.Resonance,
+	)
+	return setTrackInlineTable(path, trackID, "filter", body)
+}
+
+// SetTrackLofi rewrites or inserts the `lofi = { ... }` inline-table.
+func SetTrackLofi(path, trackID string, l LofiConfig) error {
+	body := fmt.Sprintf(
+		"enabled = %t, bits = %d, rate = %g",
+		l.Enabled, l.Bits, l.Rate,
+	)
+	return setTrackInlineTable(path, trackID, "lofi", body)
+}
+
+// SetTrackDrive rewrites or inserts the `drive = { ... }` inline-table.
+// Type defaults to soft when the caller hands a zero-value config.
+func SetTrackDrive(path, trackID string, d DriveConfig) error {
+	if d.Type == "" {
+		d.Type = DriveSoft
+	}
+	body := fmt.Sprintf(
+		"enabled = %t, type = %q, drive = %g, tone = %g, level = %g",
+		d.Enabled, string(d.Type), d.Drive, d.Tone, d.Level,
+	)
+	return setTrackInlineTable(path, trackID, "drive", body)
+}
+
+// SetTrackReverb rewrites or inserts the `reverb = { ... }` inline-table.
+func SetTrackReverb(path, trackID string, r ReverbConfig) error {
+	body := fmt.Sprintf(
+		"enabled = %t, size = %g, damping = %g, mix = %g",
+		r.Enabled, r.Size, r.Damping, r.Mix,
+	)
+	return setTrackInlineTable(path, trackID, "reverb", body)
 }
 
 // --- Internals ---

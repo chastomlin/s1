@@ -97,18 +97,26 @@ type Track struct {
 	Pan        float32 // -1.0 (full left) .. 1.0 (full right). 0 = centre.
 	Gain       float32 // per-track gain multiplier on top of velocity. 1.0 = unity.
 
-	// Effect chain — both default to "off" (flat EQ, dormant comp) when
-	// the song.toml omits the inline table, so adding tracks without
-	// effects is unchanged.
-	EQ   EQConfig
-	Comp CompConfig
+	// Effect chain — each effect defaults to "off" when the song.toml
+	// omits the inline table, so adding tracks without effects is
+	// unchanged. Audio-thread chain order is
+	// EQ → Drive → Filter → Lofi → Comp → Reverb.
+	EQ     EQConfig
+	Drive  DriveConfig
+	Filter FilterConfig
+	Lofi   LofiConfig
+	Comp   CompConfig
+	Reverb ReverbConfig
 }
 
 // EQConfig describes a 3-band EQ: low shelf, mid peak (parametric),
 // high shelf. Frequencies are in Hz; gains in dB; Q is the bandwidth
 // of the mid peak. Zero gain on a band is a unity pass-through, so
-// configuring just one band leaves the others flat.
+// configuring just one band leaves the others flat. Enabled is the
+// explicit bypass flag — when false, the whole chain is skipped even
+// if gains are non-zero, so the user can A/B without losing settings.
 type EQConfig struct {
+	Enabled  bool
 	LowFreq  float32
 	LowGain  float32
 	MidFreq  float32
@@ -119,18 +127,20 @@ type EQConfig struct {
 }
 
 // IsActive reports whether the EQ would actually colour the signal.
-// All-zero gains mean the chain can be skipped at the audio thread —
-// "flat" is a no-op rather than three biquads doing nothing.
+// Disabled or all-zero-gains both skip the chain at the audio thread.
 func (e EQConfig) IsActive() bool {
+	if !e.Enabled {
+		return false
+	}
 	return e.LowGain != 0 || e.MidGain != 0 || e.HighGain != 0
 }
 
 // CompConfig describes a feedforward compressor. Threshold in dB
 // (negative); Ratio 1.0 = no compression, 4.0 = 4:1; Attack/Release in
-// milliseconds; Makeup gain in dB applied after compression. Zero
-// Ratio (or 1.0) keeps the compressor inactive even if the inline
-// table is present, so it's easy to bypass without removing config.
+// milliseconds; Makeup gain in dB applied after compression. Enabled
+// is the explicit bypass flag.
 type CompConfig struct {
+	Enabled     bool
 	ThresholdDB float32
 	Ratio       float32
 	AttackMs    float32
@@ -139,9 +149,119 @@ type CompConfig struct {
 }
 
 // IsActive reports whether the compressor would actually reduce gain.
-// Ratio ≤ 1 means "no compression" — the chain skips it.
+// Disabled or Ratio ≤ 1 ("no compression") both skip the chain.
 func (c CompConfig) IsActive() bool {
+	if !c.Enabled {
+		return false
+	}
 	return c.Ratio > 1.0
+}
+
+// FilterType selects which output of the state-variable filter is
+// returned. Values match the strings users write in song.toml.
+type FilterType string
+
+const (
+	FilterLowpass  FilterType = "lowpass"
+	FilterHighpass FilterType = "highpass"
+	FilterBandpass FilterType = "bandpass"
+)
+
+// FilterConfig describes a resonant state-variable filter inserted
+// after the EQ stage. Cutoff is in Hz. Resonance is the user-facing
+// 0..1 knob the mixer maps to an internal Q. Type defaults to
+// lowpass — the "classic" feel — but the SVF gives the others for
+// free, hence the enum.
+type FilterConfig struct {
+	Enabled   bool
+	Type      FilterType
+	Cutoff    float32
+	Resonance float32
+}
+
+// IsActive reports whether the filter would meaningfully colour the
+// signal. Disabled, or a lowpass whose cutoff is past Nyquist with
+// no resonance, both skip the chain. We don't try to recognise every
+// pass-through edge case — when in doubt the SVF runs.
+func (f FilterConfig) IsActive() bool {
+	return f.Enabled
+}
+
+// DriveType selects the saturation curve. Soft is a tanh-based warm
+// drive, hard is a symmetric clip, fold uses a sine wavefolder for a
+// synth-y effect. String values match what the user writes in song.toml.
+type DriveType string
+
+const (
+	DriveSoft DriveType = "soft"
+	DriveHard DriveType = "hard"
+	DriveFold DriveType = "fold"
+)
+
+// DriveConfig describes the overdrive / distortion stage. Drive 0..1
+// maps internally to a 1x..20x pre-saturator gain. Tone 0..1 maps to
+// a one-pole low-pass cutoff (200 Hz..20 kHz, log-scaled) applied
+// after the saturator to tame harmonics. Level 0..2 is a linear
+// post-trim. Soft mode auto-normalises so cranking drive adds
+// harmonics rather than amplitude.
+type DriveConfig struct {
+	Enabled bool
+	Type    DriveType
+	Drive   float32
+	Tone    float32
+	Level   float32
+}
+
+// IsActive reports whether the drive stage would meaningfully change
+// the signal. We don't try to recognise every pass-through edge case
+// (drive=0, level=1, tone=1) — when in doubt, the saturator runs;
+// the cost is negligible compared to a biquad.
+func (d DriveConfig) IsActive() bool {
+	return d.Enabled
+}
+
+// ReverbConfig describes the Schroeder/Freeverb-style reverb tail.
+// Size 0..1 maps to comb feedback (small room → large hall). Damping
+// 0..1 controls how quickly the high frequencies bleed out of the
+// tail. Mix 0..1 is the dry-vs-wet crossfade — 0 is fully dry, 1 is
+// fully wet.
+type ReverbConfig struct {
+	Enabled bool
+	Size    float32
+	Damping float32
+	Mix     float32
+}
+
+// IsActive reports whether the reverb would meaningfully colour the
+// signal. Disabled or fully-dry both skip the tail. We don't try to
+// auto-detect when size or damping make the tail inaudible.
+func (r ReverbConfig) IsActive() bool {
+	if !r.Enabled {
+		return false
+	}
+	return r.Mix > 0
+}
+
+// LofiConfig describes the Amiga-style sample-rate + bit-depth crusher.
+// Bits is the target depth, 1..16 (16 = no quantisation). Rate is the
+// target playback rate in Hz; the mixer clamps it to the device rate
+// (so 44100 on a 44.1 kHz device is a no-op). No anti-aliasing on the
+// downsample path — the aliasing is the sound.
+type LofiConfig struct {
+	Enabled bool
+	Bits    int
+	Rate    float32
+}
+
+// IsActive reports whether either reduction would actually do anything
+// at the canonical device rate. Bits<16 quantises; Rate below 40 kHz
+// will reduce against any sane device rate. We can't know the exact
+// device rate here so the threshold is conservative.
+func (l LofiConfig) IsActive() bool {
+	if !l.Enabled {
+		return false
+	}
+	return l.Bits < 16 || l.Rate < 40000
 }
 
 // --- TOML binding (internal) ------------------------------------------------
@@ -175,11 +295,16 @@ type fileTrack struct {
 	BaseNote   *int     `toml:"base_note"` // optional; defaults to Note for sample tracks
 	Pan        *float64 `toml:"pan"`       // optional, default 0.0 (centre)
 	Gain       *float64 `toml:"gain"`      // optional, default 1.0 (unity)
-	EQ         *fileEQ  `toml:"eq"`
-	Comp       *fileComp `toml:"comp"`
+	EQ         *fileEQ     `toml:"eq"`
+	Drive      *fileDrive  `toml:"drive"`
+	Filter     *fileFilter `toml:"filter"`
+	Lofi       *fileLofi   `toml:"lofi"`
+	Comp       *fileComp   `toml:"comp"`
+	Reverb     *fileReverb `toml:"reverb"`
 }
 
 type fileEQ struct {
+	Enabled  *bool    `toml:"enabled"`
 	LowFreq  *float64 `toml:"low_freq"`
 	LowGain  *float64 `toml:"low_gain"`
 	MidFreq  *float64 `toml:"mid_freq"`
@@ -190,11 +315,40 @@ type fileEQ struct {
 }
 
 type fileComp struct {
+	Enabled     *bool    `toml:"enabled"`
 	ThresholdDB *float64 `toml:"threshold_db"`
 	Ratio       *float64 `toml:"ratio"`
 	AttackMs    *float64 `toml:"attack_ms"`
 	ReleaseMs   *float64 `toml:"release_ms"`
 	MakeupDB    *float64 `toml:"makeup_db"`
+}
+
+type fileFilter struct {
+	Enabled   *bool    `toml:"enabled"`
+	Type      *string  `toml:"type"`
+	Cutoff    *float64 `toml:"cutoff"`
+	Resonance *float64 `toml:"resonance"`
+}
+
+type fileLofi struct {
+	Enabled *bool    `toml:"enabled"`
+	Bits    *int     `toml:"bits"`
+	Rate    *float64 `toml:"rate"`
+}
+
+type fileDrive struct {
+	Enabled *bool    `toml:"enabled"`
+	Type    *string  `toml:"type"`
+	Drive   *float64 `toml:"drive"`
+	Tone    *float64 `toml:"tone"`
+	Level   *float64 `toml:"level"`
+}
+
+type fileReverb struct {
+	Enabled *bool    `toml:"enabled"`
+	Size    *float64 `toml:"size"`
+	Damping *float64 `toml:"damping"`
+	Mix     *float64 `toml:"mix"`
 }
 
 type fileSection struct {
@@ -355,6 +509,22 @@ func Load(path string) (*Song, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
+		filt, err := parseFilter(ft.Filter, ft.ID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		lofi, err := parseLofi(ft.Lofi, ft.ID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		drive, err := parseDrive(ft.Drive, ft.ID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		reverb, err := parseReverb(ft.Reverb, ft.ID)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
 		s.Tracks[ft.ID] = Track{
 			ID:         ft.ID,
 			Name:       ft.Name,
@@ -366,7 +536,11 @@ func Load(path string) (*Song, error) {
 			Pan:        float32(pan),
 			Gain:       float32(gain),
 			EQ:         eq,
+			Drive:      drive,
+			Filter:     filt,
+			Lofi:       lofi,
 			Comp:       comp,
+			Reverb:     reverb,
 		}
 		s.TrackOrder = append(s.TrackOrder, ft.ID)
 	}
@@ -522,7 +696,16 @@ func parseEQ(in *fileEQ, trackID string) (EQConfig, error) {
 		HighGain: 0,
 	}
 	if in == nil {
+		// No `eq = {...}` in the song — treat as "no EQ configured".
+		// Enabled stays false so the mixer skips the chain entirely.
 		return out, nil
+	}
+	// Presence of the inline table implies "I want EQ on" unless the
+	// user explicitly wrote `enabled = false`. This keeps existing
+	// songs (written before the flag existed) sounding identical.
+	out.Enabled = true
+	if in.Enabled != nil {
+		out.Enabled = *in.Enabled
 	}
 	check := func(p *float64, lo, hi float64, name string) (float32, error) {
 		if p == nil {
@@ -600,6 +783,11 @@ func parseComp(in *fileComp, trackID string) (CompConfig, error) {
 	if in == nil {
 		return out, nil
 	}
+	// Same default-true-when-present rule as parseEQ.
+	out.Enabled = true
+	if in.Enabled != nil {
+		out.Enabled = *in.Enabled
+	}
 	check := func(p *float64, lo, hi float64, name string) (float32, error) {
 		if p == nil {
 			return 0, nil
@@ -644,6 +832,175 @@ func parseComp(in *fileComp, trackID string) (CompConfig, error) {
 			return out, err
 		}
 		out.MakeupDB = v
+	}
+	return out, nil
+}
+
+// parseFilter fills a FilterConfig from the optional inline TOML
+// table. Type defaults to "lowpass" — the classic-feel default — and
+// must be one of the known FilterType values when set explicitly.
+func parseFilter(in *fileFilter, trackID string) (FilterConfig, error) {
+	// Default to a musically-useful starting point: a 2 kHz lowpass with
+	// a touch of resonance. Engaging the filter for the first time will
+	// audibly soften the top end and add a hint of character; the user
+	// can sweep cutoff up to open it back up or down to close it.
+	out := FilterConfig{
+		Type:      FilterLowpass,
+		Cutoff:    2000,
+		Resonance: 0.2,
+	}
+	if in == nil {
+		return out, nil
+	}
+	out.Enabled = true
+	if in.Enabled != nil {
+		out.Enabled = *in.Enabled
+	}
+	if in.Type != nil {
+		switch FilterType(*in.Type) {
+		case FilterLowpass, FilterHighpass, FilterBandpass:
+			out.Type = FilterType(*in.Type)
+		default:
+			return out, fmt.Errorf("track %q filter.type %q must be one of lowpass/highpass/bandpass", trackID, *in.Type)
+		}
+	}
+	if in.Cutoff != nil {
+		v := *in.Cutoff
+		if v < 20 || v > 20000 {
+			return out, fmt.Errorf("track %q filter.cutoff = %.3f out of range 20..20000", trackID, v)
+		}
+		out.Cutoff = float32(v)
+	}
+	if in.Resonance != nil {
+		v := *in.Resonance
+		if v < 0 || v > 1 {
+			return out, fmt.Errorf("track %q filter.resonance = %.3f out of range 0..1", trackID, v)
+		}
+		out.Resonance = float32(v)
+	}
+	return out, nil
+}
+
+// parseLofi fills a LofiConfig from the optional inline TOML table.
+// Bits clamps to 1..16; Rate to 1000..48000 — the mixer further
+// clamps Rate to the device sample rate so 44100 on a 44.1 kHz device
+// is a no-op.
+func parseLofi(in *fileLofi, trackID string) (LofiConfig, error) {
+	out := LofiConfig{
+		Bits: 16,
+		Rate: 44100,
+	}
+	if in == nil {
+		return out, nil
+	}
+	out.Enabled = true
+	if in.Enabled != nil {
+		out.Enabled = *in.Enabled
+	}
+	if in.Bits != nil {
+		v := *in.Bits
+		if v < 1 || v > 16 {
+			return out, fmt.Errorf("track %q lofi.bits = %d out of range 1..16", trackID, v)
+		}
+		out.Bits = v
+	}
+	if in.Rate != nil {
+		v := *in.Rate
+		if v < 1000 || v > 48000 {
+			return out, fmt.Errorf("track %q lofi.rate = %.1f out of range 1000..48000", trackID, v)
+		}
+		out.Rate = float32(v)
+	}
+	return out, nil
+}
+
+// parseDrive fills a DriveConfig from the optional inline TOML table.
+// Defaults are a gentle soft-saturation starting point — engaging
+// drive for the first time without setting any params should colour
+// the signal noticeably without obliterating it.
+func parseDrive(in *fileDrive, trackID string) (DriveConfig, error) {
+	out := DriveConfig{
+		Type:  DriveSoft,
+		Drive: 0.3,
+		Tone:  0.7,
+		Level: 1.0,
+	}
+	if in == nil {
+		return out, nil
+	}
+	out.Enabled = true
+	if in.Enabled != nil {
+		out.Enabled = *in.Enabled
+	}
+	if in.Type != nil {
+		switch DriveType(*in.Type) {
+		case DriveSoft, DriveHard, DriveFold:
+			out.Type = DriveType(*in.Type)
+		default:
+			return out, fmt.Errorf("track %q drive.type %q must be one of soft/hard/fold", trackID, *in.Type)
+		}
+	}
+	if in.Drive != nil {
+		v := *in.Drive
+		if v < 0 || v > 1 {
+			return out, fmt.Errorf("track %q drive.drive = %.3f out of range 0..1", trackID, v)
+		}
+		out.Drive = float32(v)
+	}
+	if in.Tone != nil {
+		v := *in.Tone
+		if v < 0 || v > 1 {
+			return out, fmt.Errorf("track %q drive.tone = %.3f out of range 0..1", trackID, v)
+		}
+		out.Tone = float32(v)
+	}
+	if in.Level != nil {
+		v := *in.Level
+		if v < 0 || v > 2 {
+			return out, fmt.Errorf("track %q drive.level = %.3f out of range 0..2", trackID, v)
+		}
+		out.Level = float32(v)
+	}
+	return out, nil
+}
+
+// parseReverb fills a ReverbConfig from the optional inline TOML
+// table. Defaults are a small-room starting point with a hint of
+// damping and 25% wet — engaging the reverb on a snare or vocal
+// should add space without smothering the dry signal.
+func parseReverb(in *fileReverb, trackID string) (ReverbConfig, error) {
+	out := ReverbConfig{
+		Size:    0.5,
+		Damping: 0.5,
+		Mix:     0.25,
+	}
+	if in == nil {
+		return out, nil
+	}
+	out.Enabled = true
+	if in.Enabled != nil {
+		out.Enabled = *in.Enabled
+	}
+	if in.Size != nil {
+		v := *in.Size
+		if v < 0 || v > 1 {
+			return out, fmt.Errorf("track %q reverb.size = %.3f out of range 0..1", trackID, v)
+		}
+		out.Size = float32(v)
+	}
+	if in.Damping != nil {
+		v := *in.Damping
+		if v < 0 || v > 1 {
+			return out, fmt.Errorf("track %q reverb.damping = %.3f out of range 0..1", trackID, v)
+		}
+		out.Damping = float32(v)
+	}
+	if in.Mix != nil {
+		v := *in.Mix
+		if v < 0 || v > 1 {
+			return out, fmt.Errorf("track %q reverb.mix = %.3f out of range 0..1", trackID, v)
+		}
+		out.Mix = float32(v)
 	}
 	return out, nil
 }

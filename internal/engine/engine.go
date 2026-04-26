@@ -112,6 +112,26 @@ func (e *Engine) Apply(c protocol.Command) error {
 			return nil
 		}
 		return e.setTrackComp(c.Track, *c.Comp)
+	case protocol.CmdSetTrackFilter:
+		if c.Filter == nil {
+			return nil
+		}
+		return e.setTrackFilter(c.Track, *c.Filter)
+	case protocol.CmdSetTrackLofi:
+		if c.Lofi == nil {
+			return nil
+		}
+		return e.setTrackLofi(c.Track, *c.Lofi)
+	case protocol.CmdSetTrackDrive:
+		if c.Drive == nil {
+			return nil
+		}
+		return e.setTrackDrive(c.Track, *c.Drive)
+	case protocol.CmdSetTrackReverb:
+		if c.Reverb == nil {
+			return nil
+		}
+		return e.setTrackReverb(c.Track, *c.Reverb)
 	case protocol.CmdLoop:
 		return e.setLoop(c.FromBar, c.ToBar, c.Enabled)
 	case protocol.CmdQuit:
@@ -132,24 +152,38 @@ func (e *Engine) load(path string) error {
 		return err
 	}
 	e.mu.Lock()
+	// "Same path" means this is a reload (file-watcher, manual r, or post-
+	// edit refresh) — the song is structurally the same and the user is
+	// almost certainly mid-performance. Reset only what depends on the
+	// freshly-parsed data; keep transport, position, and loop state so
+	// playback continues unbroken.
+	samePath := e.song != nil && e.song.SourcePath == path
 	e.song = s
 	e.clock.BPM = s.Project.BPM
 	// time signature numerator -> beats per bar
 	if bpb := parseBeatsPerBar(s.Project.TimeSignature); bpb > 0 {
 		e.clock.BeatsPerBar = bpb
 	}
-	e.state = protocol.StateStopped
-	e.position = Position{Bar: 1, Beat: 1}
-	e.accumBase = 0
 	e.sched = NewScheduler(s)
-	e.lastTick = 0
-	// Loop region is tied to the previously-loaded song's bar numbering;
-	// a new song starts with loop off. Bounds are kept so the TUI can
-	// re-enable quickly with L if it wants.
-	e.loopEnabled = false
+	if samePath {
+		// Re-seek the freshly-rebuilt scheduler to the current playhead
+		// so events that already played in this pass don't re-emit, and
+		// future events fire as expected.
+		e.sched.SeekTo(e.lastTick)
+	} else {
+		e.state = protocol.StateStopped
+		e.position = Position{Bar: 1, Beat: 1}
+		e.accumBase = 0
+		e.lastTick = 0
+		// A fresh song's bar numbering is unrelated to the previous one's,
+		// so any active loop bounds are meaningless. New song = loop off.
+		e.loopEnabled = false
+	}
 	e.mu.Unlock()
 
-	e.emitAllOff()
+	if !samePath {
+		e.emitAllOff()
+	}
 
 	e.bus.Publish(protocol.Event{
 		Event:        protocol.EvLoaded,
@@ -393,6 +427,7 @@ func (e *Engine) setTrackGain(trackID string, gain float32) error {
 func (e *Engine) setTrackEQ(trackID string, cfg protocol.EQConfigCmd) error {
 	return e.mutateTrack(trackID, func(t *song.Track) {
 		t.EQ = song.EQConfig{
+			Enabled: cfg.Enabled,
 			LowFreq: cfg.LowFreq, LowGain: cfg.LowGain,
 			MidFreq: cfg.MidFreq, MidQ: cfg.MidQ, MidGain: cfg.MidGain,
 			HighFreq: cfg.HighFreq, HighGain: cfg.HighGain,
@@ -403,11 +438,70 @@ func (e *Engine) setTrackEQ(trackID string, cfg protocol.EQConfigCmd) error {
 func (e *Engine) setTrackComp(trackID string, cfg protocol.CompConfigCmd) error {
 	return e.mutateTrack(trackID, func(t *song.Track) {
 		t.Comp = song.CompConfig{
+			Enabled:     cfg.Enabled,
 			ThresholdDB: cfg.ThresholdDB,
 			Ratio:       cfg.Ratio,
 			AttackMs:    cfg.AttackMs,
 			ReleaseMs:   cfg.ReleaseMs,
 			MakeupDB:    cfg.MakeupDB,
+		}
+	})
+}
+
+func (e *Engine) setTrackFilter(trackID string, cfg protocol.FilterConfigCmd) error {
+	return e.mutateTrack(trackID, func(t *song.Track) {
+		ft := song.FilterType(cfg.Type)
+		switch ft {
+		case song.FilterLowpass, song.FilterHighpass, song.FilterBandpass:
+			// ok
+		default:
+			ft = song.FilterLowpass
+		}
+		t.Filter = song.FilterConfig{
+			Enabled:   cfg.Enabled,
+			Type:      ft,
+			Cutoff:    cfg.Cutoff,
+			Resonance: cfg.Resonance,
+		}
+	})
+}
+
+func (e *Engine) setTrackLofi(trackID string, cfg protocol.LofiConfigCmd) error {
+	return e.mutateTrack(trackID, func(t *song.Track) {
+		t.Lofi = song.LofiConfig{
+			Enabled: cfg.Enabled,
+			Bits:    cfg.Bits,
+			Rate:    cfg.Rate,
+		}
+	})
+}
+
+func (e *Engine) setTrackDrive(trackID string, cfg protocol.DriveConfigCmd) error {
+	return e.mutateTrack(trackID, func(t *song.Track) {
+		dt := song.DriveType(cfg.Type)
+		switch dt {
+		case song.DriveSoft, song.DriveHard, song.DriveFold:
+			// ok
+		default:
+			dt = song.DriveSoft
+		}
+		t.Drive = song.DriveConfig{
+			Enabled: cfg.Enabled,
+			Type:    dt,
+			Drive:   cfg.Drive,
+			Tone:    cfg.Tone,
+			Level:   cfg.Level,
+		}
+	})
+}
+
+func (e *Engine) setTrackReverb(trackID string, cfg protocol.ReverbConfigCmd) error {
+	return e.mutateTrack(trackID, func(t *song.Track) {
+		t.Reverb = song.ReverbConfig{
+			Enabled: cfg.Enabled,
+			Size:    cfg.Size,
+			Damping: cfg.Damping,
+			Mix:     cfg.Mix,
 		}
 	})
 }
@@ -463,10 +557,14 @@ func (e *Engine) setSolo(track string, soloed bool) error {
 	return nil
 }
 
-// Run drives the position-event ticker until ctx is cancelled.
-// Publishes a position event at ~30Hz while playing.
+// Run drives the scheduler-emit ticker until ctx is cancelled.
+// Wakes at 1 kHz so emitted events land within ~1 ms of their scheduled
+// musical tick — fast enough that grid-quantization jitter is inaudible
+// (16ths at 124 BPM are 121 ms apart, so ±1 ms is <1% of a grid step).
+// Phase 1 of the clock overhaul will replace this wall-clock ticker
+// with the audio callback's sample counter for true device-locked timing.
 func (e *Engine) Run(stop <-chan struct{}) {
-	t := time.NewTicker(33 * time.Millisecond)
+	t := time.NewTicker(time.Millisecond)
 	defer t.Stop()
 	for {
 		select {
@@ -488,35 +586,80 @@ func (e *Engine) tick() {
 	pos := e.clock.ElapsedToPosition(elapsed)
 	nowTick := e.clock.ElapsedToTicks(elapsed)
 
-	// Loop wrap: if the playhead has crossed the loop-out bar, snap the
-	// transport back to the loop-in bar. Drop the overshoot (~one tick at
-	// worst) rather than computing a phase-accurate continuation — this
-	// is imperceptible for a TUI sequencer and keeps the wrap trivial.
+	// Decide whether this tick crosses the loop-out boundary. The wrap
+	// has to be detected before the first drain so we can cap that drain
+	// at the loop end (events past the boundary belong to the next pass).
+	willWrap := e.loopEnabled && e.loopToBar > e.loopFromBar && pos.Bar >= e.loopToBar
+
+	// Phase 1 — drain events that should fire on this tick before the
+	// wrap (i.e. the tail of the current pass). Without this cap, events
+	// in the last few ticks of the loop region were silently dropped.
+	loopEndTick := 0
+	if willWrap {
+		loopEndTick = (e.loopToBar - 1) * e.clock.BeatsPerBar * PPQN
+	}
+	emitTo := nowTick
+	if willWrap && loopEndTick < emitTo {
+		emitTo = loopEndTick
+	}
+	var noteEvents []NoteEvent
+	if e.sched != nil && emitTo > e.lastTick {
+		noteEvents = e.sched.Advance(emitTo)
+		e.lastTick = emitTo
+	}
+
+	// Phase 2 — apply the wrap with phase preservation. The plain reset
+	// (accumBase = fromBeatsTime, startedAt = now) discards the overshoot:
+	// the wrap is detected up to one tick interval (~33 ms) past the
+	// boundary, then pass 2's first event has to wait for the *next* tick
+	// — another ~33 ms — so the loop point ends up with up to ~66 ms of
+	// dead time. Audible as a "pause before the phrase starts again."
+	//
+	// Fix: bake the overshoot back into accumBase, then immediately drain
+	// any pass-2 events that fall inside the overshoot window. Pass 2's
+	// downbeat fires on the same tick as the wrap and the loop boundary
+	// stays musically tight.
 	wrapped := false
-	if e.loopEnabled && e.loopToBar > e.loopFromBar && pos.Bar >= e.loopToBar {
+	if willWrap {
 		fromBeats := (e.loopFromBar - 1) * e.clock.BeatsPerBar
-		secondsPerBeat := 60.0 / float64(e.clock.BPM)
-		e.accumBase = time.Duration(float64(fromBeats) * secondsPerBeat * float64(time.Second))
+		fromBeatsTime := beatsToDuration(fromBeats, e.clock.BPM)
+		// Overshoot in ticks at the moment of detection; clamp at zero so
+		// a tick that lands exactly on the boundary doesn't go negative.
+		overshootTicks := nowTick - loopEndTick
+		if overshootTicks < 0 {
+			overshootTicks = 0
+		}
+		overshootTime := ticksToDuration(overshootTicks, e.clock.BPM)
+
+		e.accumBase = fromBeatsTime + overshootTime
 		e.startedAt = time.Now()
 		elapsed = e.accumBase
 		pos = e.clock.ElapsedToPosition(elapsed)
 		nowTick = e.clock.ElapsedToTicks(elapsed)
+
+		fromBeatsTick := fromBeats * PPQN
 		if e.sched != nil {
-			e.sched.SeekTo(nowTick)
+			e.sched.SeekTo(fromBeatsTick)
 		}
-		e.lastTick = nowTick
+		// lastTick set to the start of pass 2 (not nowTick) so the
+		// post-wrap drain below picks up events in [fromBeatsTick, nowTick)
+		// — i.e. anything that should already have fired by now.
+		e.lastTick = fromBeatsTick
 		wrapped = true
+	}
+
+	// Phase 3 — drain pass-2 events whose AbsTick falls inside the
+	// overshoot window. For a typical 33 ms / ~6-tick overshoot this
+	// fires the downbeat (and anything else at the very start of the
+	// loop) on the same tick as the wrap.
+	if wrapped && e.sched != nil && nowTick > e.lastTick {
+		noteEvents = append(noteEvents, e.sched.Advance(nowTick)...)
+		e.lastTick = nowTick
 	}
 
 	changed := pos != e.position
 	e.position = pos
 	section := currentSection(e.song, pos, e.clock.BeatsPerBar)
-
-	var noteEvents []NoteEvent
-	if e.sched != nil && nowTick > e.lastTick {
-		noteEvents = e.sched.Advance(nowTick)
-		e.lastTick = nowTick
-	}
 	// Snapshot mute/solo so we can filter after releasing the lock.
 	soloActive := len(e.solos) > 0
 	mutes := cloneBoolMap(e.mutes)
@@ -604,6 +747,24 @@ func (e *Engine) publishPosition() {
 }
 
 // --- Helpers ---------------------------------------------------------------
+
+// beatsToDuration is the inverse of Clock.ElapsedToTicks for whole beats.
+// Integer ns arithmetic keeps the round-trip exact for non-round BPMs
+// (e.g. 119) where float math would leave us off by one tick.
+func beatsToDuration(beats, bpm int) time.Duration {
+	if bpm <= 0 {
+		return 0
+	}
+	return time.Duration(int64(beats) * int64(time.Second) * 60 / int64(bpm))
+}
+
+// ticksToDuration mirrors beatsToDuration at PPQN granularity.
+func ticksToDuration(ticks, bpm int) time.Duration {
+	if bpm <= 0 || ticks == 0 {
+		return 0
+	}
+	return time.Duration(int64(ticks) * int64(time.Second) * 60 / (int64(bpm) * int64(PPQN)))
+}
 
 func parseBeatsPerBar(ts string) int {
 	// "4/4" -> 4, "3/4" -> 3, "6/8" -> 6

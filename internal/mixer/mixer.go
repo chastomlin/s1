@@ -21,10 +21,21 @@ const (
 	// full-scale so two maxed voices don't instantly clip. 0.7 ≈ -3 dB.
 	masterGain = 0.7
 
-	// deviceSampleRate is the output rate we request. 44.1 kHz is the
-	// most common WAV rate so per-voice resampling is usually a no-op.
-	deviceSampleRate = 44100
+	// deviceSampleRate is the output rate we request. 48 kHz matches
+	// PipeWire/PulseAudio's near-universal native rate on modern Linux
+	// — requesting anything else triggers transparent resampling that
+	// produces lumpy callback intervals (alternating 21/10 ms pattern
+	// at 44.1 kHz, observed during the 2026-04-26 timing investigation).
+	// Per-voice varispeed handles the rate conversion on samples that
+	// were authored at 44.1 kHz, so this only affects device negotiation.
+	deviceSampleRate = 48000
 	deviceChannels   = 2
+
+	// devicePeriodFrames asks malgo for a small audio-callback period
+	// so the trigger-quantization floor is ~5 ms instead of PipeWire's
+	// default ~20 ms. PipeWire honours this as a hint; the actual period
+	// is logged at device-open time.
+	devicePeriodFrames = 256
 
 	// maxAudioBufferFrames caps the size of pre-allocated scratch
 	// buffers (per-track buses, master direct path). Real audio
@@ -179,9 +190,25 @@ func (m *Mixer) SetTrackBuses(configs []TrackChainConfig, maxFrames int) {
 			bus.eq.configure(cfg.EQ, sampleRate)
 			bus.eqOn = true
 		}
+		if cfg.DriveOn {
+			bus.drive.configure(cfg.Drive, sampleRate)
+			bus.driveOn = true
+		}
+		if cfg.FilterOn {
+			bus.filter.configure(cfg.Filter, sampleRate)
+			bus.filterOn = true
+		}
+		if cfg.LofiOn {
+			bus.lofi.configure(cfg.Lofi, sampleRate)
+			bus.lofiOn = true
+		}
 		if cfg.CompOn {
 			bus.comp.configure(cfg.Comp, sampleRate)
 			bus.compOn = true
+		}
+		if cfg.ReverbOn {
+			bus.reverb.configure(cfg.Reverb, sampleRate)
+			bus.reverbOn = true
 		}
 		next[cfg.ID] = bus
 	}
@@ -218,6 +245,7 @@ func (m *Mixer) Start() error {
 	cfg.Playback.Format = malgo.FormatF32
 	cfg.Playback.Channels = deviceChannels
 	cfg.SampleRate = deviceSampleRate
+	cfg.PeriodSizeInFrames = devicePeriodFrames
 	cfg.Alsa.NoMMap = 1
 
 	cb := malgo.DeviceCallbacks{

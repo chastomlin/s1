@@ -38,9 +38,13 @@ const (
 	CmdAudition     CmdKind = "audition"
 	CmdSetTrackPan  CmdKind = "set_track_pan"
 	CmdSetTrackGain CmdKind = "set_track_gain"
-	CmdSetTrackEQ   CmdKind = "set_track_eq"
-	CmdSetTrackComp CmdKind = "set_track_comp"
-	CmdQuit         CmdKind = "quit"
+	CmdSetTrackEQ     CmdKind = "set_track_eq"
+	CmdSetTrackComp   CmdKind = "set_track_comp"
+	CmdSetTrackFilter CmdKind = "set_track_filter"
+	CmdSetTrackLofi   CmdKind = "set_track_lofi"
+	CmdSetTrackDrive  CmdKind = "set_track_drive"
+	CmdSetTrackReverb CmdKind = "set_track_reverb"
+	CmdQuit           CmdKind = "quit"
 )
 
 // Command is the envelope the TUI sends to the engine.
@@ -72,12 +76,27 @@ type Command struct {
 
 	// set_track_comp
 	Comp *CompConfigCmd `json:"comp,omitempty"`
+
+	// set_track_filter
+	Filter *FilterConfigCmd `json:"filter,omitempty"`
+
+	// set_track_lofi
+	Lofi *LofiConfigCmd `json:"lofi,omitempty"`
+
+	// set_track_drive
+	Drive *DriveConfigCmd `json:"drive,omitempty"`
+
+	// set_track_reverb
+	Reverb *ReverbConfigCmd `json:"reverb,omitempty"`
 }
 
 // EQConfigCmd carries a track's full 3-band EQ state in a single
 // transient command. The TUI mix view pushes one of these on any
 // param change so the engine can update the in-memory song atomically.
+// Enabled is the explicit bypass flag, sent on every push so toggling
+// the bypass round-trips without disturbing the band settings.
 type EQConfigCmd struct {
+	Enabled  bool    `json:"enabled"`
 	LowFreq  float32 `json:"low_freq"`
 	LowGain  float32 `json:"low_gain"`
 	MidFreq  float32 `json:"mid_freq"`
@@ -89,11 +108,46 @@ type EQConfigCmd struct {
 
 // CompConfigCmd carries the compressor params for set_track_comp.
 type CompConfigCmd struct {
+	Enabled     bool    `json:"enabled"`
 	ThresholdDB float32 `json:"threshold_db"`
 	Ratio       float32 `json:"ratio"`
 	AttackMs    float32 `json:"attack_ms"`
 	ReleaseMs   float32 `json:"release_ms"`
 	MakeupDB    float32 `json:"makeup_db"`
+}
+
+// FilterConfigCmd carries the resonant-filter params. Type is the
+// SVF mode string ("lowpass" / "highpass" / "bandpass").
+type FilterConfigCmd struct {
+	Enabled   bool    `json:"enabled"`
+	Type      string  `json:"type"`
+	Cutoff    float32 `json:"cutoff"`
+	Resonance float32 `json:"resonance"`
+}
+
+// LofiConfigCmd carries the bitcrush + sample-rate-reduction params.
+type LofiConfigCmd struct {
+	Enabled bool    `json:"enabled"`
+	Bits    int     `json:"bits"`
+	Rate    float32 `json:"rate"`
+}
+
+// DriveConfigCmd carries the overdrive params. Type is the saturator
+// curve string ("soft" / "hard" / "fold").
+type DriveConfigCmd struct {
+	Enabled bool    `json:"enabled"`
+	Type    string  `json:"type"`
+	Drive   float32 `json:"drive"`
+	Tone    float32 `json:"tone"`
+	Level   float32 `json:"level"`
+}
+
+// ReverbConfigCmd carries the Freeverb-style reverb params.
+type ReverbConfigCmd struct {
+	Enabled bool    `json:"enabled"`
+	Size    float32 `json:"size"`
+	Damping float32 `json:"damping"`
+	Mix     float32 `json:"mix"`
 }
 
 // --- Events -----------------------------------------------------------------

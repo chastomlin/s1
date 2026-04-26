@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"seqone/internal/engine"
+	"seqone/internal/midiin"
 	"seqone/internal/mixer"
 	"seqone/internal/protocol"
 	"seqone/internal/rtpmidi"
@@ -27,8 +28,15 @@ func main() {
 	loadPath := flag.String("load", "", "optional song.toml to load on startup")
 	midiTarget := flag.String("midi", "", "optional RTP-MIDI peer as host:controlPort (e.g. 127.0.0.1:5004)")
 	midiName := flag.String("midi-name", "seqone", "local session name advertised to RTP-MIDI peer")
+	midiIn := flag.String("midi-in", "", "MIDI input device — substring of /proc/asound/cards entry, or full /dev/snd/midiCxDy path")
+	midiList := flag.Bool("midi-list-in", false, "list available MIDI input devices and exit")
 	noAudio := flag.Bool("no-audio", false, "disable local sample playback (MIDI-only output)")
+	debugEvents := flag.Bool("debug-events", false, "log every EvNote published by the engine — useful for diagnosing loop-boundary timing")
 	flag.Parse()
+
+	if *midiList {
+		listMidiInputsAndExit()
+	}
 
 	logger := log.New(os.Stderr, "seqoned ", log.LstdFlags|log.Lmicroseconds)
 	eng := engine.New(logger)
@@ -161,6 +169,24 @@ func main() {
 		}()
 	}
 
+	if *midiIn != "" {
+		startMidiInputListener(ctx, *midiIn, logger)
+	}
+
+	if *debugEvents {
+		evCh, evUnsub := eng.Bus().Subscribe()
+		go func() {
+			defer evUnsub()
+			for ev := range evCh {
+				if ev.Event != protocol.EvNote {
+					continue
+				}
+				logger.Printf("DBG: %s track=%q section=%q note=%d vel=%d",
+					ev.NoteKind, ev.Track, ev.Section, ev.Note, ev.Vel)
+			}
+		}()
+	}
+
 	tickStop := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -201,6 +227,30 @@ func configureMixerBuses(m *mixer.Mixer, s *song.Song) {
 			}
 			cfg.EQOn = true
 		}
+		if t.Drive.IsActive() {
+			cfg.Drive = mixer.DriveParams{
+				Mode:  driveModeFromSong(t.Drive.Type),
+				Drive: t.Drive.Drive,
+				Tone:  t.Drive.Tone,
+				Level: t.Drive.Level,
+			}
+			cfg.DriveOn = true
+		}
+		if t.Filter.IsActive() {
+			cfg.Filter = mixer.FilterParams{
+				Mode:      filterModeFromSong(t.Filter.Type),
+				Cutoff:    t.Filter.Cutoff,
+				Resonance: t.Filter.Resonance,
+			}
+			cfg.FilterOn = true
+		}
+		if t.Lofi.IsActive() {
+			cfg.Lofi = mixer.LofiParams{
+				Bits: t.Lofi.Bits,
+				Rate: t.Lofi.Rate,
+			}
+			cfg.LofiOn = true
+		}
 		if t.Comp.IsActive() {
 			cfg.Comp = mixer.CompParams{
 				ThresholdDB: t.Comp.ThresholdDB,
@@ -211,11 +261,19 @@ func configureMixerBuses(m *mixer.Mixer, s *song.Song) {
 			}
 			cfg.CompOn = true
 		}
+		if t.Reverb.IsActive() {
+			cfg.Reverb = mixer.ReverbParams{
+				Size:    t.Reverb.Size,
+				Damping: t.Reverb.Damping,
+				Mix:     t.Reverb.Mix,
+			}
+			cfg.ReverbOn = true
+		}
 		// Only allocate a bus when at least one effect is on. Tracks
 		// without effects bypass the per-bus accumulation entirely
 		// (voices fall through to the master scratch path), saving
 		// one float-add per frame per voice.
-		if cfg.EQOn || cfg.CompOn {
+		if cfg.EQOn || cfg.DriveOn || cfg.FilterOn || cfg.LofiOn || cfg.CompOn || cfg.ReverbOn {
 			cfgs = append(cfgs, cfg)
 		}
 	}
@@ -283,6 +341,33 @@ func routingFor(t song.Track) rtpmidi.TrackRouting {
 	}
 }
 
+// filterModeFromSong maps the song-side enum string to the mixer's
+// numeric mode. Anything unrecognised falls back to lowpass — the
+// validating loader catches bad strings, so this is just a safety net.
+func filterModeFromSong(t song.FilterType) mixer.FilterMode {
+	switch t {
+	case song.FilterHighpass:
+		return mixer.FilterModeHighpass
+	case song.FilterBandpass:
+		return mixer.FilterModeBandpass
+	default:
+		return mixer.FilterModeLowpass
+	}
+}
+
+// driveModeFromSong is the saturator-curve counterpart to
+// filterModeFromSong.
+func driveModeFromSong(t song.DriveType) mixer.DriveMode {
+	switch t {
+	case song.DriveHard:
+		return mixer.DriveModeHard
+	case song.DriveFold:
+		return mixer.DriveModeFold
+	default:
+		return mixer.DriveModeSoft
+	}
+}
+
 // splitHostPort parses "host:port" or "[host]:port" into its two components.
 // We can't use net.SplitHostPort alone because it returns a string port; we
 // also want the int.
@@ -296,4 +381,60 @@ func splitHostPort(s string) (string, int, error) {
 		return "", 0, fmt.Errorf("port %q is not an integer", p)
 	}
 	return h, port, nil
+}
+
+// listMidiInputsAndExit prints any /dev/snd/midiCxDy devices the
+// kernel currently exposes, with friendly names from /proc/asound/cards
+// when available. Used by `seqoned -midi-list-in` so the user can
+// confirm the controller is recognised before naming it via -midi-in.
+func listMidiInputsAndExit() {
+	devs, err := midiin.List()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "midiin: %v\n", err)
+		os.Exit(1)
+	}
+	if len(devs) == 0 {
+		fmt.Println("no MIDI input devices found (plug in a controller and try again)")
+		os.Exit(0)
+	}
+	for _, d := range devs {
+		fmt.Printf("  %s\t%s\n", d.Path, d.Name)
+	}
+	os.Exit(0)
+}
+
+// startMidiInputListener resolves the user's device selection (substring
+// match on the friendly name, or full /dev/snd path) and launches a
+// goroutine that logs each parsed message. This is the smoke-test
+// stage — once we've confirmed events arrive, we'll replace the body
+// of the loop with a CC→param dispatch.
+func startMidiInputListener(ctx context.Context, sel string, logger *log.Logger) {
+	dev, err := midiin.FindByName(sel)
+	if err != nil {
+		logger.Printf("midi-in: %v", err)
+		return
+	}
+	logger.Printf("midi-in: opening %s (%s)", dev.Path, dev.Name)
+	msgs, err := midiin.Listen(ctx, dev.Path)
+	if err != nil {
+		logger.Printf("midi-in: %v", err)
+		return
+	}
+	go func() {
+		for m := range msgs {
+			switch m.Kind {
+			case midiin.KindControlChange:
+				logger.Printf("midi-in: CC ch=%d cc=%d val=%d", m.Channel, m.Data1, m.Data2)
+			case midiin.KindNoteOn:
+				logger.Printf("midi-in: NoteOn ch=%d note=%d vel=%d", m.Channel, m.Data1, m.Data2)
+			case midiin.KindNoteOff:
+				logger.Printf("midi-in: NoteOff ch=%d note=%d", m.Channel, m.Data1)
+			case midiin.KindPitchBend:
+				logger.Printf("midi-in: Bend ch=%d lsb=%d msb=%d", m.Channel, m.Data1, m.Data2)
+			case midiin.KindProgramChange:
+				logger.Printf("midi-in: PC ch=%d pgm=%d", m.Channel, m.Data1)
+			}
+		}
+		logger.Printf("midi-in: stream closed")
+	}()
 }

@@ -11,12 +11,20 @@ package mixer
 // allocation-free. The eq/comp are bypass-checked per buffer so the
 // "no effects" case is a copy plus a sum, no DSP.
 type trackBus struct {
-	bufL    []float32
-	bufR    []float32
-	eq      threeBandEQ
-	eqOn    bool
-	comp    compressor
-	compOn  bool
+	bufL     []float32
+	bufR     []float32
+	eq       threeBandEQ
+	eqOn     bool
+	drive    driveStage
+	driveOn  bool
+	filter   svFilter
+	filterOn bool
+	lofi     lofiCrush
+	lofiOn   bool
+	comp     compressor
+	compOn   bool
+	reverb   reverbStage
+	reverbOn bool
 }
 
 // reset zeros the bus's scratch buffers so a fresh accumulation starts
@@ -30,10 +38,11 @@ func (b *trackBus) reset(frames int) {
 }
 
 // process runs the bus's effect chain over the first `frames` samples
-// of bufL/bufR in place. Skips inactive effects so a track without EQ
-// or comp configured pays no DSP cost.
+// of bufL/bufR in place. Chain order:
+// EQ → Drive → Filter → Lofi → Comp → Reverb. Skips inactive effects
+// so a track without configured DSP pays no cost.
 func (b *trackBus) process(frames int) {
-	if !b.eqOn && !b.compOn {
+	if !b.eqOn && !b.driveOn && !b.filterOn && !b.lofiOn && !b.compOn && !b.reverbOn {
 		return
 	}
 	l := b.bufL[:frames]
@@ -41,8 +50,20 @@ func (b *trackBus) process(frames int) {
 	if b.eqOn {
 		b.eq.process(l, r)
 	}
+	if b.driveOn {
+		b.drive.process(l, r)
+	}
+	if b.filterOn {
+		b.filter.process(l, r)
+	}
+	if b.lofiOn {
+		b.lofi.process(l, r)
+	}
 	if b.compOn {
 		b.comp.process(l, r)
+	}
+	if b.reverbOn {
+		b.reverb.process(l, r)
 	}
 }
 
@@ -50,11 +71,47 @@ func (b *trackBus) process(frames int) {
 // when SetTrackBuses is called. Populated by seqoned from the loaded
 // song.Track entries — keeps package mixer ignorant of song details.
 type TrackChainConfig struct {
-	ID     string
-	EQ     EQParams
-	EQOn   bool
-	Comp   CompParams
-	CompOn bool
+	ID       string
+	EQ       EQParams
+	EQOn     bool
+	Drive    DriveParams
+	DriveOn  bool
+	Filter   FilterParams
+	FilterOn bool
+	Lofi     LofiParams
+	LofiOn   bool
+	Comp     CompParams
+	CompOn   bool
+	Reverb   ReverbParams
+	ReverbOn bool
+}
+
+// ReverbParams is the public mirror of song.ReverbConfig.
+type ReverbParams struct {
+	Size    float32
+	Damping float32
+	Mix     float32
+}
+
+// DriveParams is the public mirror of song.DriveConfig.
+type DriveParams struct {
+	Mode  DriveMode
+	Drive float32
+	Tone  float32
+	Level float32
+}
+
+// FilterParams is the public mirror of song.FilterConfig.
+type FilterParams struct {
+	Mode      FilterMode
+	Cutoff    float32
+	Resonance float32
+}
+
+// LofiParams is the public mirror of song.LofiConfig.
+type LofiParams struct {
+	Bits int
+	Rate float32
 }
 
 // EQParams is the public mirror of song.EQConfig — same fields,

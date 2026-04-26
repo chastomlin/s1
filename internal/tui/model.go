@@ -58,6 +58,14 @@ type Model struct {
 	// edits. Nil when no song path was provided.
 	watcher *fsnotify.Watcher
 
+	// lastSelfEdit is set by mix-view apply paths just before they
+	// rewrite song.toml. The fileChangedMsg handler swallows the
+	// would-be-redundant engine reload when this is recent — the engine
+	// already has the change in memory (we sent the Cmd directly), and a
+	// reload would emit AllOff and cut in-flight voices. External edits
+	// (no recent self-edit) still trigger a full reload.
+	lastSelfEdit time.Time
+
 	// prompt holds state for the load-song input prompt opened by "l".
 	prompt promptState
 
@@ -223,9 +231,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, scheduleDecay()
 
 	case fileChangedMsg:
-		cmds := []tea.Cmd{
-			sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdReload}),
-			loadSongLocal(m.songPath),
+		// Always refresh our own copy of the song so the renderer sees
+		// the latest values. Whether we ALSO ask the engine to reload
+		// depends on whether this looks like an external edit: when the
+		// TUI itself just wrote (mix-view tweaks, etc.) the engine has
+		// already been told via a direct Cmd, so a CmdReload here would
+		// just trigger an unnecessary AllOff and stop in-flight voices.
+		cmds := []tea.Cmd{loadSongLocal(m.songPath)}
+		if time.Since(m.lastSelfEdit) > 500*time.Millisecond {
+			cmds = append(cmds, sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdReload}))
 		}
 		if m.watcher != nil {
 			cmds = append(cmds, awaitFileChange(m.watcher))

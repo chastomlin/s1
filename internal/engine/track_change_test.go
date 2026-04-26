@@ -63,6 +63,7 @@ func TestEngine_CmdSetTrackEQUpdatesAllFields(t *testing.T) {
 	}
 
 	cfg := protocol.EQConfigCmd{
+		Enabled: true,
 		LowFreq: 250, LowGain: 3.0,
 		MidFreq: 700, MidQ: 0.5, MidGain: -2.0,
 		HighFreq: 9000, HighGain: 1.5,
@@ -74,6 +75,7 @@ func TestEngine_CmdSetTrackEQUpdatesAllFields(t *testing.T) {
 	}
 	got := eng.CurrentSong().Tracks["k"].EQ
 	want := song.EQConfig{
+		Enabled: true,
 		LowFreq: 250, LowGain: 3.0,
 		MidFreq: 700, MidQ: 0.5, MidGain: -2.0,
 		HighFreq: 9000, HighGain: 1.5,
