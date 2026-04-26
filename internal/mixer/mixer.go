@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gen2brain/malgo"
 )
@@ -139,6 +140,14 @@ type Mixer struct {
 
 	// Shutdown plumbing.
 	closeOnce sync.Once
+
+	// audioFrames counts the total frames the audio device has rendered
+	// since process start. Incremented at the top of every onData call.
+	// Read by AudioTimeSource (engine package's TimeSource impl) to drive
+	// the scheduler off the device's sample clock instead of wall time.
+	// Atomic so the engine's tick goroutine can read without coordinating
+	// with the audio thread.
+	audioFrames atomic.Uint64
 }
 
 // New creates a mixer configured for the given sample bank. Samples are
@@ -268,6 +277,22 @@ func (m *Mixer) Start() error {
 	m.log.Printf("mixer: audio device open — %d Hz, %d ch, %d voices",
 		m.deviceRate, deviceChannels, MaxVoices)
 	return nil
+}
+
+// AudioFramesRendered is the cumulative count of output frames the audio
+// device has rendered since process start. Driven by the audio callback;
+// safe to read from any goroutine. Returns 0 until the device opens and
+// fires its first onData. AudioTimeSource turns this counter into a
+// time.Time the engine reads from its scheduler tick.
+func (m *Mixer) AudioFramesRendered() uint64 {
+	return m.audioFrames.Load()
+}
+
+// DeviceRate returns the audio device's actual sample rate in Hz. Set by
+// Start after the driver negotiates a rate; falls back to deviceSampleRate
+// if Start hasn't run yet.
+func (m *Mixer) DeviceRate() int {
+	return m.deviceRate
 }
 
 // Stop halts playback and releases the device. Idempotent.
@@ -400,6 +425,13 @@ func (m *Mixer) AllOff() {
 // Keep it allocation-free; drain triggers with a non-blocking loop then
 // sum all active voices into the output buffer.
 func (m *Mixer) onData(outBytes, _ []byte, frames uint32) {
+	// Advance the audio-clock frame counter before doing any work. The
+	// engine's TimeSource reads this via AudioFramesRendered() and turns
+	// it into musical time — bumping it first means the engine sees the
+	// time advance for THIS buffer's events as soon as they're queued,
+	// not after the buffer is rendered.
+	m.audioFrames.Add(uint64(frames))
+
 	// Drain triggers first so events that arrived between buffers apply
 	// to this buffer's output.
 	for {

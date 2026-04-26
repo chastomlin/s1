@@ -44,6 +44,13 @@ type Engine struct {
 	sched    *Scheduler
 	lastTick int // highest abs-tick already emitted, to guard tempo/seek races
 
+	// timeSrc is the real-time clock the scheduler reads. Defaults to a
+	// wall-clock; seqoned swaps in mixer.NewAudioTimeSource at startup so
+	// the scheduler is locked to the audio device's sample clock when it's
+	// available. Guarded by mu so SetTimeSource can be called concurrently
+	// with tick(); reads inside tick() happen under the same lock.
+	timeSrc TimeSource
+
 	bus *Bus
 	log *log.Logger
 }
@@ -53,13 +60,27 @@ func New(logger *log.Logger) *Engine {
 		logger = log.Default()
 	}
 	return &Engine{
-		state: protocol.StateStopped,
-		clock: Clock{BPM: 120, BeatsPerBar: 4},
-		mutes: map[string]bool{},
-		solos: map[string]bool{},
-		bus:   NewBus(),
-		log:   logger,
+		state:   protocol.StateStopped,
+		clock:   Clock{BPM: 120, BeatsPerBar: 4},
+		mutes:   map[string]bool{},
+		solos:   map[string]bool{},
+		bus:     NewBus(),
+		log:     logger,
+		timeSrc: wallClockSource{},
 	}
+}
+
+// SetTimeSource swaps the real-time clock the scheduler reads. Intended
+// for one-shot startup wiring (seqoned injects an audio-callback-driven
+// source after the mixer's device opens) and for tests that want a fake
+// clock. Safe to call while the engine is running.
+func (e *Engine) SetTimeSource(ts TimeSource) {
+	if ts == nil {
+		return
+	}
+	e.mu.Lock()
+	e.timeSrc = ts
+	e.mu.Unlock()
 }
 
 // Bus returns the event bus so servers can subscribe clients to it.
@@ -214,7 +235,7 @@ func (e *Engine) play() error {
 		e.mu.Unlock()
 		return nil
 	}
-	e.startedAt = time.Now()
+	e.startedAt = e.timeSrc.Now()
 	e.state = protocol.StatePlaying
 	e.mu.Unlock()
 	e.publishState()
@@ -240,7 +261,7 @@ func (e *Engine) stop() error {
 func (e *Engine) pause() error {
 	e.mu.Lock()
 	if e.state == protocol.StatePlaying {
-		e.accumBase += time.Since(e.startedAt)
+		e.accumBase += e.timeSrc.Now().Sub(e.startedAt)
 	}
 	e.state = protocol.StatePaused
 	e.mu.Unlock()
@@ -272,7 +293,7 @@ func (e *Engine) seek(bar, beat int) error {
 	}
 	e.accumBase = time.Duration(accumNs)
 	if e.state == protocol.StatePlaying {
-		e.startedAt = time.Now()
+		e.startedAt = e.timeSrc.Now()
 	}
 	e.lastTick = targetTick
 	if e.sched != nil {
@@ -296,7 +317,7 @@ func (e *Engine) setTempo(bpm int) error {
 	e.mu.Lock()
 	// Preserve musical position across tempo change: compute current musical
 	// time at old tempo, then rebase startedAt at new tempo.
-	now := time.Now()
+	now := e.timeSrc.Now()
 	var musical time.Duration = e.accumBase
 	if e.state == protocol.StatePlaying {
 		musical += now.Sub(e.startedAt)
@@ -582,7 +603,7 @@ func (e *Engine) tick() {
 		e.mu.Unlock()
 		return
 	}
-	elapsed := e.accumBase + time.Since(e.startedAt)
+	elapsed := e.accumBase + e.timeSrc.Now().Sub(e.startedAt)
 	pos := e.clock.ElapsedToPosition(elapsed)
 	nowTick := e.clock.ElapsedToTicks(elapsed)
 
@@ -632,7 +653,7 @@ func (e *Engine) tick() {
 		overshootTime := ticksToDuration(overshootTicks, e.clock.BPM)
 
 		e.accumBase = fromBeatsTime + overshootTime
-		e.startedAt = time.Now()
+		e.startedAt = e.timeSrc.Now()
 		elapsed = e.accumBase
 		pos = e.clock.ElapsedToPosition(elapsed)
 		nowTick = e.clock.ElapsedToTicks(elapsed)

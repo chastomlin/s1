@@ -59,6 +59,13 @@ func main() {
 			mix = nil
 		} else {
 			defer mix.Stop()
+			// Lock the engine's scheduler clock to the audio device's
+			// sample counter. The scheduler now advances at exactly the
+			// rate audio frames are produced — no GC drift, no OS-scheduler
+			// jitter. -no-audio and audio-init-failure paths fall through
+			// without this call, leaving the engine on its default wall
+			// clock so MIDI-only mode still works.
+			eng.SetTimeSource(mixer.NewAudioTimeSource(mix))
 			// Pre-load samples for a song passed via -load.
 			if s := eng.CurrentSong(); s != nil {
 				loadSamplesInto(mix, s, logger)

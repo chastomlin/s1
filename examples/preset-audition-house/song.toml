@@ -34,6 +34,9 @@ name    = "Kick"
 sample  = "bd"
 channel = 10
 note    = 36   # GM acoustic bass drum
+comp = { enabled = true, threshold_db = -6, ratio = 4.1999984, attack_ms = 5, release_ms = 50, makeup_db = 0 }
+gain = 1.9499991
+eq = { enabled = true, low_freq = 390, low_gain = 6.5, mid_freq = 1000, mid_q = 1, mid_gain = 0, high_freq = 5000, high_gain = 0 }
 
 [[tracks]]
 id      = "clap"
