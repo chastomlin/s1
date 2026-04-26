@@ -140,6 +140,30 @@ func TestBridge_AllOffFanout(t *testing.T) {
 	}
 }
 
+func TestBridge_SendProgramChanges(t *testing.T) {
+	cap := &captureSender{}
+	br := NewBridge(cap, nil, log.New(io.Discard, "", 0))
+	br.SendProgramChanges([]ProgramAssignment{
+		{Channel: 1, Program: 33},  // bass → wire 0xC0 0x21
+		{Channel: 2, Program: 81},  // lead → wire 0xC1 0x51
+		{Channel: 0, Program: 5},   // invalid channel — skip
+		{Channel: 17, Program: 5},  // invalid channel — skip
+		{Channel: 3, Program: -1},  // invalid program — skip
+		{Channel: 3, Program: 128}, // invalid program — skip
+	})
+
+	m := cap.Msgs()
+	if len(m) != 2 {
+		t.Fatalf("want 2 PCs (others skipped), got %d: %x", len(m), m)
+	}
+	if !bytes.Equal(m[0], []byte{0xC0, 33}) {
+		t.Errorf("ch1 program 33: got %x want C0 21", m[0])
+	}
+	if !bytes.Equal(m[1], []byte{0xC1, 81}) {
+		t.Errorf("ch2 program 81: got %x want C1 51", m[1])
+	}
+}
+
 func TestBridge_PitchedTrackWithSampleRoutingIgnoresSampleMapping(t *testing.T) {
 	// If a track has sample routing but the engine sends a pitched note
 	// event for it (unusual but possible during schema errors), we fall

@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -19,6 +20,7 @@ type fakePeer struct {
 	ctrlPort   int
 	ssrc       uint32
 	received   chan DataPacket
+	ckByCount  [3]atomic.Int32 // counts of received CKs at count=0,1,2
 	wg         sync.WaitGroup
 }
 
@@ -70,9 +72,12 @@ func (p *fakePeer) serve(conn net.PacketConn, which string) {
 		pkt := buf[:n]
 		if IsSessionControl(pkt) {
 			if len(pkt) >= 4 && pkt[2] == 'C' && pkt[3] == 'K' {
-				// Respond to initiator's count=0 with count=1.
 				ck, err := ParseClockSync(pkt)
+				if err == nil && ck.Count <= 2 {
+					p.ckByCount[ck.Count].Add(1)
+				}
 				if err == nil && ck.Count == 0 {
+					// Respond to initiator's count=0 with count=1.
 					reply := ClockSync{
 						SSRC:       p.ssrc,
 						Count:      1,
@@ -167,6 +172,45 @@ func TestSession_HandshakeAndSend(t *testing.T) {
 
 	if err := sess.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestSession_InitiatorCKKeepalive(t *testing.T) {
+	// Shrink the initiator cadence so the test runs in <1s. Restore on exit.
+	prev := CKInterval
+	CKInterval = 50 * time.Millisecond
+	defer func() { CKInterval = prev }()
+
+	peer := startFakePeer(t)
+	defer peer.stop()
+
+	logger := log.New(io.Discard, "", 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sess, err := Dial(ctx, "127.0.0.1", peer.ctrlPort, "tester", 2*time.Second, logger)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer sess.Close()
+
+	// Wait long enough for: initial CK (1s delay), then several ticks. The
+	// initial delay dominates, so allow 1.4s total to be safe.
+	deadline := time.Now().Add(1400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if peer.ckByCount[0].Load() >= 2 && peer.ckByCount[2].Load() >= 2 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	got0 := peer.ckByCount[0].Load()
+	got2 := peer.ckByCount[2].Load()
+	if got0 < 2 {
+		t.Errorf("expected at least 2 count=0 CKs from initiator, got %d", got0)
+	}
+	if got2 < 2 {
+		t.Errorf("expected at least 2 count=2 CKs (responder reply round-trip), got %d", got2)
 	}
 }
 

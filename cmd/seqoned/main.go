@@ -166,6 +166,24 @@ func main() {
 			return routingFor(t), true
 		}
 		bridge := rtpmidi.NewBridge(midiSess, resolve, logger)
+		// Send Program Change for every instrument-bound track on the
+		// initial song (if any) and on every reload, so synths like
+		// FluidSynth land on the right GM patch before the first note.
+		if s := eng.CurrentSong(); s != nil {
+			bridge.SendProgramChanges(programAssignmentsFor(s))
+		}
+		loadEvents, loadUnsub := eng.Bus().Subscribe()
+		go func() {
+			defer loadUnsub()
+			for ev := range loadEvents {
+				if ev.Event != protocol.EvLoaded {
+					continue
+				}
+				if s := eng.CurrentSong(); s != nil {
+					bridge.SendProgramChanges(programAssignmentsFor(s))
+				}
+			}
+		}()
 		go func() {
 			bridge.Run(events)
 			unsub()
@@ -346,6 +364,30 @@ func routingFor(t song.Track) rtpmidi.TrackRouting {
 		Note:     t.Note,
 		IsSample: t.Sample != "",
 	}
+}
+
+// programAssignmentsFor walks instrument-bound tracks and returns one
+// (channel, program) pair per track. Tracks bound to samples or to an
+// unknown instrument are skipped. Iteration follows TrackOrder so that
+// duplicate-channel cases resolve deterministically (last entry wins on
+// the synth side).
+func programAssignmentsFor(s *song.Song) []rtpmidi.ProgramAssignment {
+	out := make([]rtpmidi.ProgramAssignment, 0, len(s.TrackOrder))
+	for _, id := range s.TrackOrder {
+		t, ok := s.Tracks[id]
+		if !ok || t.Instrument == "" {
+			continue
+		}
+		inst, ok := s.Instruments[t.Instrument]
+		if !ok {
+			continue
+		}
+		out = append(out, rtpmidi.ProgramAssignment{
+			Channel: t.Channel,
+			Program: inst.Program,
+		})
+	}
+	return out
 }
 
 // filterModeFromSong maps the song-side enum string to the mixer's

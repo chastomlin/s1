@@ -28,6 +28,13 @@ type TrackRouting struct {
 // pitched notes and drops sample triggers in that case.
 type Resolver func(trackID string) (TrackRouting, bool)
 
+// ProgramAssignment is one (channel, program) pair to emit as a MIDI Program
+// Change. Channel is 1..16 (user-facing); Program is 0..127.
+type ProgramAssignment struct {
+	Channel int
+	Program int
+}
+
 // Bridge subscribes to an engine event bus and forwards note-on, note-off,
 // and all-off events as MIDI messages on a Sender. Per-track routing is
 // resolved on each event so reloading the song picks up new bindings.
@@ -83,6 +90,22 @@ func (b *Bridge) handle(ev protocol.Event) {
 		for ch := byte(0); ch < 16; ch++ {
 			b.sendBytes([]byte{0xB0 | ch, 123, 0})
 		}
+	}
+}
+
+// SendProgramChanges emits a Program Change message for each assignment.
+// Out-of-range channel/program values are skipped silently. Duplicate
+// channels are sent in caller order — the synth keeps the last value.
+func (b *Bridge) SendProgramChanges(progs []ProgramAssignment) {
+	for _, p := range progs {
+		if p.Channel < 1 || p.Channel > 16 {
+			continue
+		}
+		if p.Program < 0 || p.Program > 127 {
+			continue
+		}
+		ch := byte(p.Channel - 1)
+		b.sendBytes([]byte{0xC0 | ch, byte(p.Program)})
 	}
 }
 

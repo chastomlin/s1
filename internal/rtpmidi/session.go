@@ -12,11 +12,24 @@ import (
 	"time"
 )
 
+// CKInterval is the cadence at which the initiator (us) sends count=0 CK
+// packets to keep the AppleMIDI session alive. AppleMIDI peers (notably
+// rtpmidid) treat a session with no recent initiator-side CK probes as
+// dead and tear it down with BY after their own grace period (typically
+// 30–60 s). Exposed as a package variable so tests can shorten it.
+var CKInterval = 10 * time.Second
+
+// initialCKDelay is how soon after handshake the first CK probe fires.
+// Picking a small value (vs waiting a full CKInterval) means short-lived
+// sessions still emit at least one CK so peers see proof-of-life early.
+const initialCKDelay = 1 * time.Second
+
 // Session is an outbound RTP-MIDI session to a single remote peer. It binds
 // two adjacent UDP sockets locally (control + data = control+1), runs the
 // AppleMIDI invitation handshake on both, then lets you Send MIDI bytes as
 // RTP-MIDI data packets on the data socket. A background goroutine per
-// socket reads incoming packets and responds to peer-initiated clock syncs.
+// socket reads incoming packets and responds to peer-initiated clock syncs;
+// a separate goroutine sends initiator-side CK probes on the data port.
 type Session struct {
 	name  string
 	ssrc  uint32
@@ -32,6 +45,9 @@ type Session struct {
 	mu     sync.Mutex
 	seq    uint16
 	closed bool
+
+	stopCh   chan struct{}
+	stopOnce sync.Once
 
 	wg  sync.WaitGroup
 	log *log.Logger
@@ -75,6 +91,7 @@ func Dial(ctx context.Context, host string, controlPort int, localName string, d
 		remoteControl: remoteCtrl,
 		remoteData:    remoteData,
 		startedAt:     time.Now(),
+		stopCh:        make(chan struct{}),
 		log:           logger,
 	}
 
@@ -87,9 +104,10 @@ func Dial(ctx context.Context, host string, controlPort int, localName string, d
 		return nil, fmt.Errorf("data port handshake: %w", err)
 	}
 
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.receiveLoop(ctrl, remoteCtrl, "control")
 	go s.receiveLoop(data, remoteData, "data")
+	go s.ckLoop()
 
 	return s, nil
 }
@@ -193,9 +211,53 @@ func (s *Session) receiveLoop(conn net.PacketConn, remote net.Addr, which string
 			s.mu.Lock()
 			s.closed = true
 			s.mu.Unlock()
+			s.signalStop()
 			return
 		}
 	}
+}
+
+// ckLoop sends initiator-side count=0 CK probes on the data port at
+// CKInterval cadence. The first probe fires after initialCKDelay so
+// short sessions still emit at least one CK. Exits when stopCh closes.
+func (s *Session) ckLoop() {
+	defer s.wg.Done()
+	initial := time.NewTimer(initialCKDelay)
+	defer initial.Stop()
+	ticker := time.NewTicker(CKInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-initial.C:
+			s.sendCK0()
+		case <-ticker.C:
+			s.sendCK0()
+		}
+	}
+}
+
+// sendCK0 emits one count=0 CK packet to the remote data port. We don't
+// retain the timestamp for offset estimation yet — the round-trip exists
+// purely to satisfy the peer's keepalive watchdog. The reply (count=1)
+// is handled by the data-port receiveLoop, which fills timestamp[2] and
+// sends count=2 back; the existing handleCK path covers that already.
+func (s *Session) sendCK0() {
+	pkt := ClockSync{
+		SSRC:       s.ssrc,
+		Count:      0,
+		Timestamps: [3]uint64{s.timestamp64(), 0, 0},
+	}.Marshal()
+	if _, err := s.data.WriteTo(pkt, s.remoteData); err != nil {
+		s.log.Printf("rtpmidi: send CK0: %v", err)
+	}
+}
+
+// signalStop closes stopCh exactly once. Both Close (outbound teardown)
+// and the receiveLoop (peer-initiated BY) call this so the ckLoop exits.
+func (s *Session) signalStop() {
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 // handleCK responds to a peer's clock-sync probe. If they sent count=0, we
@@ -264,6 +326,7 @@ func (s *Session) Close() error {
 	}
 	s.closed = true
 	s.mu.Unlock()
+	s.signalStop()
 
 	bye := SessionPacket{
 		Cmd:     CmdBye,
