@@ -1,0 +1,34 @@
+[preset]
+name        = "House — Four on the Floor (classic)"
+genre       = "electronic/house"
+bars        = 4
+bpm_hint    = 124
+description = "Classic 124 BPM house groove. Pumping kick, backbeat clap, offbeat open hat, driving 16th closed hat."
+
+# Each part is one .pat file plus the role it plays. On import the TUI
+# prompts the user to bind each role to an existing track or create a
+# new one with the gm_note default.
+
+[[parts]]
+role    = "kick"
+kind    = "drum"
+file    = "kick.pat"
+gm_note = 36   # GM acoustic bass drum
+
+[[parts]]
+role    = "clap"
+kind    = "drum"
+file    = "clap.pat"
+gm_note = 39   # GM hand clap
+
+[[parts]]
+role    = "hat-closed"
+kind    = "drum"
+file    = "hat-closed.pat"
+gm_note = 42   # GM closed hi-hat
+
+[[parts]]
+role    = "hat-open"
+kind    = "drum"
+file    = "hat-open.pat"
+gm_note = 46   # GM open hi-hat

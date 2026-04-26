@@ -1,0 +1,65 @@
+# Audition song for the `electronic/house/4onfloor-classic` preset bundle.
+# Points pattern_dir directly at the bundle so the .pat files are read
+# in-place — no copies into this directory. Drum samples are referenced
+# by absolute path from the local sample collection.
+
+[project]
+title           = "preset audition — house"
+bpm             = 124
+time_signature  = "4/4"
+
+[song]
+pattern_dir = "../../presets/electronic/house/4onfloor-classic"
+arrangement = ["groove*8"]   # ~62s at 124 BPM
+
+[[samples]]
+id   = "bd"
+path = "/home/chast/Music/Samples/wav/0611L_BD.wav"
+
+[[samples]]
+id   = "clp"
+path = "/home/chast/Music/Samples/wav/3614R_CLP.wav"
+
+[[samples]]
+id   = "hh"
+path = "/home/chast/Music/Samples/wav/0513L_HH.wav"
+
+[[samples]]
+id   = "ohh"
+path = "/home/chast/Music/Samples/wav/0614L_OHH.wav"
+
+[[tracks]]
+id      = "kick"
+name    = "Kick"
+sample  = "bd"
+channel = 10
+note    = 36   # GM acoustic bass drum
+
+[[tracks]]
+id      = "clap"
+name    = "Clap"
+sample  = "clp"
+channel = 10
+note    = 39   # GM hand clap
+
+[[tracks]]
+id      = "hatc"
+name    = "Hat (closed)"
+sample  = "hh"
+channel = 10
+note    = 42   # GM closed hi-hat
+
+[[tracks]]
+id      = "hato"
+name    = "Hat (open)"
+sample  = "ohh"
+channel = 10
+note    = 46   # GM open hi-hat
+
+# Single 4-bar groove pulling all four parts from the bundle.
+# Right-hand pattern names come from the bundle's .pat filenames
+# (kick.pat, clap.pat, hat-closed.pat, hat-open.pat).
+[[sections]]
+name  = "groove"
+bars  = 4
+parts = { kick = "kick", clap = "clap", hatc = "hat-closed", hato = "hat-open" }

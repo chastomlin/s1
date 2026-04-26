@@ -1,0 +1,24 @@
+[preset]
+name        = "Techno — Driving (130 BPM)"
+genre       = "electronic/techno"
+bars        = 4
+bpm_hint    = 130
+description = "Driving 130 BPM techno. Pumping kick, relentless even 16th hats, clap on the backbeat."
+
+[[parts]]
+role    = "kick"
+kind    = "drum"
+file    = "kick.pat"
+gm_note = 36   # GM acoustic bass drum
+
+[[parts]]
+role    = "hat-closed"
+kind    = "drum"
+file    = "hat.pat"
+gm_note = 42   # GM closed hi-hat
+
+[[parts]]
+role    = "clap"
+kind    = "drum"
+file    = "clap.pat"
+gm_note = 39   # GM hand clap
