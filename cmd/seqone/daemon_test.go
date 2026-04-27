@@ -29,7 +29,7 @@ func TestSpawnAndStopDaemon(t *testing.T) {
 	// Redirect log into the temp dir by shadowing $XDG_RUNTIME_DIR.
 	t.Setenv("XDG_RUNTIME_DIR", dir)
 
-	daemon, err := spawnDaemon(socket, "")
+	daemon, err := spawnDaemon(socket, "", "", "")
 	if err != nil {
 		t.Fatalf("spawnDaemon: %v", err)
 	}

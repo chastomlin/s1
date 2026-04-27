@@ -34,6 +34,12 @@ type Engine struct {
 	mutes map[string]bool
 	solos map[string]bool
 
+	// midiInTrack is the live target track id for Note On/Off arriving
+	// from the MIDI input device. Empty disables routing. Set via
+	// CmdSetMidiInTrack — the TUI keeps it in sync with whatever track
+	// is currently highlighted, so live keys "follow the cursor".
+	midiInTrack string
+
 	// loop state: when loopEnabled, the playhead wraps from loopToBar back
 	// to loopFromBar. Bars are 1-based; the region is [from, to) — to is
 	// the first bar NOT in the loop, matching how Cmd.ToBar is specified.
@@ -119,6 +125,9 @@ func (e *Engine) Apply(c protocol.Command) error {
 		return e.setSolo(c.Track, c.Soloed)
 	case protocol.CmdAudition:
 		return e.audition(c.Track, c.Note, c.Vel)
+	case protocol.CmdSetMidiInTrack:
+		e.SetMidiInTrack(c.Track)
+		return nil
 	case protocol.CmdSetTrackPan:
 		return e.setTrackPan(c.Track, c.Pan)
 	case protocol.CmdSetTrackGain:
@@ -429,6 +438,180 @@ func (e *Engine) audition(track string, note, vel int) error {
 		})
 	})
 	return nil
+}
+
+// LiveCC dispatches one MIDI Control Change message arriving from a
+// hardware controller against the supplied track. It implements the
+// GM-default mapping:
+//
+//   CC 1  (mod wheel) → pass-through to RTP-MIDI on the track's channel
+//                       (pitched tracks only — sample tracks ignore it)
+//   CC 7  (volume)    → set the track's gain
+//   CC 10 (pan)       → set the track's pan
+//   CC 64 (sustain)   → pass-through to RTP-MIDI on the track's channel
+//                       (pitched tracks only)
+//   CC 120 / 123      → broadcast NoteAllOff (panic — clear stuck notes)
+//
+// Out-of-range CCs and CCs with no defined mapping are silently dropped.
+// Mute/solo are intentionally NOT honoured here: gain/pan tweaks should
+// take effect even on muted tracks so the user can prepare a mix while
+// listening to others.
+func (e *Engine) LiveCC(track string, cc int, value uint8) {
+	// CC 120 (All Sound Off) and CC 123 (All Notes Off) are panic events
+	// — broadcast regardless of track because controllers send these on
+	// the controller's channel, not the routed-track channel.
+	if cc == 120 || cc == 123 {
+		e.emitAllOff()
+		return
+	}
+	if track == "" {
+		return
+	}
+	v := int(value)
+	if v < 0 {
+		v = 0
+	}
+	if v > 127 {
+		v = 127
+	}
+	switch cc {
+	case 1, 64: // mod wheel, sustain — pass through unchanged
+		e.passthroughCC(track, cc, v)
+	case 7: // volume → gain
+		// Linear, halfway = unity. value 64 → 1.0; value 127 → 1.98 (~+6dB).
+		gain := float32(v) / 64.0
+		_ = e.setTrackGain(track, gain)
+	case 10: // pan
+		// 64 = centre, 0 = full left, 127 = full right.
+		pan := float32(v-64) / 63.0
+		if pan < -1 {
+			pan = -1
+		}
+		if pan > 1 {
+			pan = 1
+		}
+		_ = e.setTrackPan(track, pan)
+	}
+}
+
+// passthroughCC publishes an EvCC event for the rtpmidi bridge to send
+// out, but only for pitched tracks (sample tracks have no meaningful
+// out-channel). Looks up the track's channel from the song so the CC
+// rides on the same channel as the track's notes.
+func (e *Engine) passthroughCC(trackID string, cc, value int) {
+	e.mu.Lock()
+	s := e.song
+	e.mu.Unlock()
+	if s == nil {
+		return
+	}
+	t, ok := s.Tracks[trackID]
+	if !ok {
+		return
+	}
+	if t.Sample != "" {
+		return // sample track — nothing to pass through to
+	}
+	if t.Channel < 1 || t.Channel > 16 {
+		return
+	}
+	e.bus.Publish(protocol.Event{
+		Event:   protocol.EvCC,
+		Track:   trackID,
+		Channel: t.Channel,
+		CC:      cc,
+		CCValue: value,
+	})
+}
+
+// SetMidiInTrack updates the live-MIDI routing target. Empty disables
+// routing — incoming notes are dropped. Concurrency-safe; the input
+// listener reads via MidiInTrack on every event so changes take effect
+// without restarting the listener.
+func (e *Engine) SetMidiInTrack(id string) {
+	e.mu.Lock()
+	e.midiInTrack = id
+	e.mu.Unlock()
+}
+
+// MidiInTrack returns the current live-MIDI routing target (possibly "").
+func (e *Engine) MidiInTrack() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.midiInTrack
+}
+
+// LiveNote publishes a single note event from an external real-time source
+// (a hardware MIDI controller, etc) onto the engine's bus, exactly as the
+// scheduler would for a pattern cell. Unlike audition(), no auto-release
+// timer fires — the caller is responsible for sending the matching
+// LiveNote(...,on=false) when the key is released.
+//
+// Sample tracks emit SampleTrigger on press (the pitch follows the key);
+// pitched/instrument tracks emit NoteOn on press and NoteOff on release.
+// Mute and solo are honoured so live play stays silent on muted tracks
+// just like scheduled cells.
+func (e *Engine) LiveNote(track string, note, vel int, on bool) {
+	if track == "" {
+		return
+	}
+	e.mu.Lock()
+	s := e.song
+	soloActive := len(e.solos) > 0
+	muted := e.mutes[track]
+	soloed := e.solos[track]
+	e.mu.Unlock()
+	if (soloActive && !soloed) || (!soloActive && muted) {
+		return
+	}
+	if s == nil {
+		return
+	}
+	t, ok := s.Tracks[track]
+	if !ok {
+		return
+	}
+	if t.Sample != "" {
+		// Sample track: only press triggers a one-shot. Releases are
+		// ignored — sample voices decay on their own envelope.
+		if !on {
+			return
+		}
+		if vel <= 0 {
+			vel = 100
+		}
+		e.bus.Publish(protocol.Event{
+			Event:    protocol.EvNote,
+			NoteKind: protocol.SampleTrigger,
+			Track:    track,
+			Note:     note,
+			Vel:      vel,
+		})
+		return
+	}
+	// Pitched / instrument track.
+	if note <= 0 {
+		return
+	}
+	if on {
+		if vel <= 0 {
+			vel = 100
+		}
+		e.bus.Publish(protocol.Event{
+			Event:    protocol.EvNote,
+			NoteKind: protocol.NoteOn,
+			Track:    track,
+			Note:     note,
+			Vel:      vel,
+		})
+		return
+	}
+	e.bus.Publish(protocol.Event{
+		Event:    protocol.EvNote,
+		NoteKind: protocol.NoteOff,
+		Track:    track,
+		Note:     note,
+	})
 }
 
 // setTrackPan / setTrackGain / setTrackEQ / setTrackComp swap the

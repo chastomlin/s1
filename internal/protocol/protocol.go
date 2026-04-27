@@ -44,6 +44,11 @@ const (
 	CmdSetTrackLofi   CmdKind = "set_track_lofi"
 	CmdSetTrackDrive  CmdKind = "set_track_drive"
 	CmdSetTrackReverb CmdKind = "set_track_reverb"
+	// CmdSetMidiInTrack tells the engine which track receives Note On/Off
+	// from the configured MIDI input device (-midi-in). The TUI sends this
+	// whenever the user moves the section-view selection so live keys
+	// follow whatever's highlighted. Empty Track disables routing.
+	CmdSetMidiInTrack CmdKind = "set_midi_in_track"
 	CmdQuit           CmdKind = "quit"
 )
 
@@ -159,6 +164,11 @@ const (
 	EvState        EventKind = "state"
 	EvPosition     EventKind = "position"
 	EvNote         EventKind = "note"
+	// EvCC carries a MIDI Control Change event the engine wants forwarded
+	// out of the RTP-MIDI bridge unmodified. Used today for pass-through
+	// of mod wheel / sustain from a hardware controller; the engine
+	// publishes one of these per inbound CC event on a pitched track.
+	EvCC           EventKind = "cc"
 	EvMeter        EventKind = "meter"
 	EvTrackChanged EventKind = "track_changed"
 	EvError        EventKind = "error"
@@ -213,6 +223,12 @@ type Event struct {
 	Track    string   `json:"track,omitempty"`
 	Note     int      `json:"note,omitempty"`
 	Vel      int      `json:"vel,omitempty"`
+
+	// cc — populated for EvCC. Channel is 1..16 (matches Track.Channel);
+	// CC and CCValue are the standard MIDI 0..127 numbers.
+	Channel int `json:"channel,omitempty"`
+	CC      int `json:"cc,omitempty"`
+	CCValue int `json:"cc_value,omitempty"`
 
 	// meter — published periodically (~20 Hz) when audio is enabled.
 	// Master is the post-master-gain L/R reading; MeterTracks carries

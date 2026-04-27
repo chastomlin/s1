@@ -160,11 +160,11 @@ func (m Model) updateArrangement(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Seek the engine to the start of this slot so pressing play
 		// auditions the section you drilled into, not bar 1 of the song.
 		startBar := m.slotStartBar(m.arrangementIdx)
-		return m, sendCommand(m.conn, protocol.Command{
+		return m, tea.Batch(m.syncMidiInTrack(), sendCommand(m.conn, protocol.Command{
 			Cmd:  protocol.CmdSeek,
 			Bar:  startBar,
 			Beat: 1,
-		})
+		}))
 	case "n":
 		m.prompt = promptState{kind: promptNewSectionName}
 		return m, nil
@@ -314,12 +314,12 @@ func (m Model) updateSection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedTrackIdx > 0 {
 			m.selectedTrackIdx--
 		}
-		return m, nil
+		return m, m.syncMidiInTrack()
 	case "down", "j":
 		if n := len(m.displayTracks()); m.selectedTrackIdx < n-1 {
 			m.selectedTrackIdx++
 		}
-		return m, nil
+		return m, m.syncMidiInTrack()
 	case "m":
 		id := m.selectedTrackID()
 		if id == "" {
@@ -368,7 +368,10 @@ func (m Model) updateSection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedTrackIdx > 0 {
 			m.selectedTrackIdx--
 		}
-		return m, sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdReload})
+		return m, tea.Batch(
+			sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdReload}),
+			m.syncMidiInTrack(),
+		)
 	case "D":
 		// Broad delete — gate behind a y/n confirm since it hits [[tracks]]
 		// plus every section that referenced this track.

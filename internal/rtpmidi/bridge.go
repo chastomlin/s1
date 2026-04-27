@@ -59,11 +59,32 @@ func NewBridge(send Sender, resolve Resolver, logger *log.Logger) *Bridge {
 // from Send are logged and otherwise ignored — the engine bus keeps flowing.
 func (b *Bridge) Run(events <-chan protocol.Event) {
 	for ev := range events {
-		if ev.Event != protocol.EvNote {
-			continue
+		switch ev.Event {
+		case protocol.EvNote:
+			b.handle(ev)
+		case protocol.EvCC:
+			b.handleCC(ev)
 		}
-		b.handle(ev)
 	}
+}
+
+// handleCC forwards a Control Change event onto the wire on the channel
+// the engine resolved (pitched tracks only — the engine drops sample
+// tracks before publishing). Out-of-range values are clamped/dropped
+// rather than producing malformed MIDI.
+func (b *Bridge) handleCC(ev protocol.Event) {
+	if ev.CC < 0 || ev.CC > 127 {
+		return
+	}
+	v := ev.CCValue
+	if v < 0 {
+		v = 0
+	}
+	if v > 127 {
+		v = 127
+	}
+	ch := wireChannel(ev.Channel, b.fallback)
+	b.sendBytes([]byte{0xB0 | ch, byte(ev.CC), byte(v)})
 }
 
 func (b *Bridge) handle(ev protocol.Event) {

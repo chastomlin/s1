@@ -48,13 +48,15 @@ func run() error {
 	socket := flag.String("socket", protocol.DefaultSocketPath(os.Getenv("XDG_RUNTIME_DIR")), "engine socket")
 	songPath := flag.String("song", "", "song.toml to load on startup")
 	midiTarget := flag.String("midi", "", "forward -midi host:port to auto-spawned seqoned (ignored if seqoned already running)")
+	midiIn := flag.String("midi-in", "", "forward -midi-in (controller device substring or /dev/snd path) to auto-spawned seqoned")
+	midiInTrack := flag.String("midi-in-track", "", "forward -midi-in-track (live-play target track id) to auto-spawned seqoned")
 	flag.Parse()
 
 	// Try the existing socket first, briefly. If nothing's there, spawn one.
 	conn, err := dialWithRetry(*socket, 2, 50*time.Millisecond)
 	var daemon *daemonHandle
 	if err != nil {
-		daemon, err = spawnDaemon(*socket, *midiTarget)
+		daemon, err = spawnDaemon(*socket, *midiTarget, *midiIn, *midiInTrack)
 		if err != nil {
 			return fmt.Errorf("could not start seqoned: %w", err)
 		}
@@ -153,8 +155,9 @@ func (d *daemonHandle) stop() error {
 // spawnDaemon locates the seqoned binary (sibling to our own exe first,
 // then $PATH), starts it with the given socket path, and redirects its
 // stdout/stderr to a log file so it doesn't corrupt the TUI alt-screen.
-// If midiTarget is non-empty, it's forwarded as -midi.
-func spawnDaemon(socketPath, midiTarget string) (*daemonHandle, error) {
+// Non-empty midiTarget / midiIn / midiInTrack are forwarded as -midi /
+// -midi-in / -midi-in-track respectively.
+func spawnDaemon(socketPath, midiTarget, midiIn, midiInTrack string) (*daemonHandle, error) {
 	exe, err := locateSeqoned()
 	if err != nil {
 		return nil, err
@@ -168,6 +171,12 @@ func spawnDaemon(socketPath, midiTarget string) (*daemonHandle, error) {
 	args := []string{"-socket", socketPath}
 	if midiTarget != "" {
 		args = append(args, "-midi", midiTarget)
+	}
+	if midiIn != "" {
+		args = append(args, "-midi-in", midiIn)
+	}
+	if midiInTrack != "" {
+		args = append(args, "-midi-in-track", midiInTrack)
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile

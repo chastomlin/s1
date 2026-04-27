@@ -83,6 +83,11 @@ type Model struct {
 	// modeArrangement.
 	sectionView string
 
+	// lastSentMidiInTrack remembers what we last told the engine about the
+	// live-MIDI routing target, so we only push CmdSetMidiInTrack when the
+	// highlighted track actually changes. Empty before the first send.
+	lastSentMidiInTrack string
+
 	// selectedTrackIdx indexes into displayTracks() on the section screen.
 	// Navigated with ↑/↓; carried into the editor on Enter.
 	selectedTrackIdx int
@@ -224,7 +229,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mix = mixState{}
 			}
 		}
-		return m, nil
+		// First load (or any reload that shifted the highlighted track)
+		// is when we tell the engine which track receives live MIDI.
+		return m, m.syncMidiInTrack()
 
 	case decayTickMsg:
 		// Tick alone triggers a re-render so flashes visibly decay.
@@ -613,7 +620,10 @@ func (m Model) updateConfirmDeleteTrack(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedTrackIdx > 0 {
 			m.selectedTrackIdx--
 		}
-		return m, sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdReload})
+		return m, tea.Batch(
+			sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdReload}),
+			m.syncMidiInTrack(),
+		)
 	case "n", "N", "esc":
 		m.prompt = promptState{}
 		return m, nil
@@ -630,6 +640,21 @@ func (m Model) sendLoop() tea.Cmd {
 		ToBar:   m.loopToBar,
 		Enabled: m.loopEnabled,
 	})
+}
+
+// syncMidiInTrack returns a tea.Cmd that pushes the engine's live-MIDI
+// routing target into sync with whatever track is currently highlighted,
+// or nil if no change is needed. The TUI calls this after every section-
+// view selection move so live-keyboard play follows the cursor without
+// requiring a dedicated key. Updates lastSentMidiInTrack so the next
+// no-op move doesn't re-spam the engine.
+func (m *Model) syncMidiInTrack() tea.Cmd {
+	desired := m.selectedTrackID()
+	if desired == m.lastSentMidiInTrack {
+		return nil
+	}
+	m.lastSentMidiInTrack = desired
+	return sendCommand(m.conn, protocol.Command{Cmd: protocol.CmdSetMidiInTrack, Track: desired})
 }
 
 // selectedTrackID returns the ID of the row currently highlighted on the

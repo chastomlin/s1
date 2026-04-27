@@ -1,0 +1,28 @@
+# Build output
+/bin/
+/dist/
+
+# Go test + coverage artifacts
+*.test
+*.out
+*.prof
+coverage.txt
+
+# Runtime / log files (seqoned writes these into $XDG_RUNTIME_DIR, but in
+# case anyone runs with a redirected log path inside the repo)
+*.log
+*.sock
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local Claude Code settings (per-user permissions, not for sharing)
+.claude/

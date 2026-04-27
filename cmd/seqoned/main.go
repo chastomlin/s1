@@ -29,6 +29,7 @@ func main() {
 	midiTarget := flag.String("midi", "", "optional RTP-MIDI peer as host:controlPort (e.g. 127.0.0.1:5004)")
 	midiName := flag.String("midi-name", "seqone", "local session name advertised to RTP-MIDI peer")
 	midiIn := flag.String("midi-in", "", "MIDI input device — substring of /proc/asound/cards entry, or full /dev/snd/midiCxDy path")
+	midiInTrack := flag.String("midi-in-track", "", "route Note On/Off from -midi-in to this track id (live play). CCs/PC/Bend are still logged.")
 	midiList := flag.Bool("midi-list-in", false, "list available MIDI input devices and exit")
 	noAudio := flag.Bool("no-audio", false, "disable local sample playback (MIDI-only output)")
 	debugEvents := flag.Bool("debug-events", false, "log every EvNote published by the engine — useful for diagnosing loop-boundary timing")
@@ -195,7 +196,13 @@ func main() {
 	}
 
 	if *midiIn != "" {
-		startMidiInputListener(ctx, *midiIn, logger)
+		// Seed the live-MIDI target from the CLI flag. The TUI may then
+		// override it via CmdSetMidiInTrack as the user moves the
+		// section-view cursor; headless runs keep this seed value.
+		if *midiInTrack != "" {
+			eng.SetMidiInTrack(*midiInTrack)
+		}
+		startMidiInputListener(ctx, *midiIn, eng, logger)
 	}
 
 	if *debugEvents {
@@ -454,10 +461,12 @@ func listMidiInputsAndExit() {
 
 // startMidiInputListener resolves the user's device selection (substring
 // match on the friendly name, or full /dev/snd path) and launches a
-// goroutine that logs each parsed message. This is the smoke-test
-// stage — once we've confirmed events arrive, we'll replace the body
-// of the loop with a CC→param dispatch.
-func startMidiInputListener(ctx context.Context, sel string, logger *log.Logger) {
+// goroutine that handles each parsed message. Note On/Off are routed
+// into the engine via LiveNote against whatever track the engine has
+// configured as the live-MIDI target (set via -midi-in-track at startup
+// and/or by the TUI on every selection change). Other message kinds
+// (CC, PC, Bend) are logged for now — CC→param dispatch lands next.
+func startMidiInputListener(ctx context.Context, sel string, eng *engine.Engine, logger *log.Logger) {
 	dev, err := midiin.FindByName(sel)
 	if err != nil {
 		logger.Printf("midi-in: %v", err)
@@ -473,11 +482,23 @@ func startMidiInputListener(ctx context.Context, sel string, logger *log.Logger)
 		for m := range msgs {
 			switch m.Kind {
 			case midiin.KindControlChange:
-				logger.Printf("midi-in: CC ch=%d cc=%d val=%d", m.Channel, m.Data1, m.Data2)
+				// CC 120/123 are panic CCs — applied unconditionally
+				// (LiveCC handles them without needing a track). Other
+				// CCs route to the live-MIDI target so per-track gain
+				// /pan/pass-through follows the highlighted track.
+				eng.LiveCC(eng.MidiInTrack(), int(m.Data1), m.Data2)
 			case midiin.KindNoteOn:
-				logger.Printf("midi-in: NoteOn ch=%d note=%d vel=%d", m.Channel, m.Data1, m.Data2)
+				if track := eng.MidiInTrack(); track != "" {
+					eng.LiveNote(track, int(m.Data1), int(m.Data2), true)
+				} else {
+					logger.Printf("midi-in: NoteOn ch=%d note=%d vel=%d (no track configured)", m.Channel, m.Data1, m.Data2)
+				}
 			case midiin.KindNoteOff:
-				logger.Printf("midi-in: NoteOff ch=%d note=%d", m.Channel, m.Data1)
+				if track := eng.MidiInTrack(); track != "" {
+					eng.LiveNote(track, int(m.Data1), 0, false)
+				} else {
+					logger.Printf("midi-in: NoteOff ch=%d note=%d", m.Channel, m.Data1)
+				}
 			case midiin.KindPitchBend:
 				logger.Printf("midi-in: Bend ch=%d lsb=%d msb=%d", m.Channel, m.Data1, m.Data2)
 			case midiin.KindProgramChange:
